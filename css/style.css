@@ -24,6 +24,12 @@ body {
   font: 15px/1.45 var(--font);
   min-height: 100vh;
 }
+/* Start- und Lobby-Bildschirm: Schlacht-Hintergrund mit dunklem Overlay (lesbar) */
+body:has(.start), body:has(.lobby) {
+  background:
+    linear-gradient(rgba(9, 13, 19, .72), rgba(9, 13, 19, .88)),
+    url(../assets/start-bg.jpg) center / cover fixed no-repeat;
+}
 h1, h2, h3 { margin: 0 0 .5rem; line-height: 1.2; }
 h1 { font-family: var(--font-display); letter-spacing: .04em; }
 h2 { font-size: 1.05rem; }
