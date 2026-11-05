@@ -1,0 +1,11 @@
+{
+  "name": "weltherrschaft",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rundenbasiertes Eroberungsspiel für Freunde – Peer-to-Peer im Browser",
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes serve -l 8080 .",
+    "test": "node --test"
+  }
+}
