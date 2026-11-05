@@ -182,24 +182,70 @@ input, select {
 
 /* ---------------------------------------------------------------- SVG-Karte */
 .sea { fill: var(--sea); }
-.graticule { stroke: rgba(255,255,255,.04); stroke-width: 1; }
-.continent { opacity: .2; }
-.cont-label { font: 700 15px var(--font-display); letter-spacing: .1em; text-anchor: middle; opacity: .85; text-transform: uppercase; pointer-events: none; }
-.edge { stroke: rgba(255,255,255,.28); stroke-width: 2; }
-.sea-route { stroke-dasharray: 5 6; stroke: rgba(255,255,255,.22); }
+.cont-label {
+  font: 700 13px var(--font-display); letter-spacing: .14em; text-anchor: middle;
+  text-transform: uppercase; pointer-events: none; fill: #403524; opacity: .95;
+  paint-order: stroke; stroke: rgba(240,230,200,.8); stroke-width: 3px; stroke-linejoin: round;
+}
+.edge { stroke: rgba(255,255,255,.16); stroke-width: 2; }
+.sea-route { fill: none; stroke-dasharray: 5 5; stroke-width: 1.6; stroke: rgba(240,230,200,.6); stroke-linecap: round; pointer-events: none; }
 .combat-arrow { stroke-width: 4; stroke-linecap: round; opacity: .9; pointer-events: none; }
 
-.terr .token { stroke: rgba(0,0,0,.55); stroke-width: 2; transition: stroke-width .12s; }
+.terr .land { stroke: #3a2f20; stroke-width: 1.2; stroke-linejoin: round; fill-opacity: .88; transition: fill-opacity .12s; }
+.terr.clickable:hover .land { fill-opacity: 1; }
+.terr.selected .land { stroke: #fff; stroke-width: 2.5; }
+.terr.target .land { stroke: var(--danger); stroke-width: 2.5; }
+.terr.candidate .land { stroke: #fff; stroke-width: 2; stroke-dasharray: 4 3; }
+.terr.editing .land { stroke: #ffd23f; stroke-width: 2.5; }
+.dbg-vertex { fill: #ffd23f; stroke: #5a3e00; stroke-width: 1; cursor: grab; }
+.dbg-add { fill: rgba(255,210,63,.35); stroke: #ffd23f; stroke-width: 1; stroke-dasharray: 2 2; cursor: copy; }
+
+.terr .token { stroke: rgba(0,0,0,.55); stroke-width: 2; transition: stroke-width .12s; filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.45)); }
 .terr.clickable { cursor: pointer; }
 .terr.clickable:hover .token { stroke: #fff; stroke-width: 3; }
 .terr.candidate .token { stroke: #fff; stroke-width: 3; stroke-dasharray: 5 3; animation: pulse 1.1s ease-in-out infinite; }
 .terr.selected .token { stroke: #fff; stroke-width: 5; stroke-dasharray: none; }
 .terr.target .token { stroke: var(--danger); stroke-width: 5; stroke-dasharray: none; }
-.troops { font: 700 15px var(--font); text-anchor: middle; pointer-events: none; }
+.troops { font: 700 10px var(--font); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
 .tname {
-  font: 600 11px var(--font); fill: #fff; text-anchor: middle; pointer-events: none;
-  paint-order: stroke; stroke: rgba(0,0,0,.75); stroke-width: 3px; stroke-linejoin: round;
+  font: 600 11px var(--font); fill: #2a2016; text-anchor: middle; pointer-events: none;
+  paint-order: stroke; stroke: rgba(242,232,204,.9); stroke-width: 3px; stroke-linejoin: round;
 }
+/* Debug-Overlay (?debug=1) */
+.dbg-grid { stroke: rgba(255,70,70,.28); stroke-width: .5; pointer-events: none; }
+.dbg-grid.major { stroke: rgba(255,70,70,.5); }
+.dbg-axis { fill: #ff5a5a; font: 7px ui-monospace, monospace; pointer-events: none; }
+.dbg-id {
+  fill: #ffd23f; font: 700 8px ui-monospace, monospace; text-anchor: middle; pointer-events: none;
+  paint-order: stroke; stroke: rgba(0,0,0,.85); stroke-width: 2px; stroke-linejoin: round;
+}
+.terr.clickable .token { cursor: grab; }
+.dbg-bar {
+  position: fixed; left: 12px; bottom: 12px; z-index: 20;
+  display: flex; gap: .6rem; align-items: center;
+  background: rgba(13,20,28,.93); color: #ffd23f; border: 1px solid var(--border);
+  border-radius: 10px; padding: .4rem .55rem; font-size: .8rem;
+}
+.dbg-export {
+  position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.dbg-export-inner {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 1rem; width: min(680px, 94vw); max-height: 86vh; display: flex; flex-direction: column; gap: .6rem;
+}
+.dbg-export-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.dbg-export textarea {
+  width: 100%; height: 62vh; resize: vertical;
+  font: 12px/1.5 ui-monospace, monospace; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: .6rem;
+}
+.dbg-seg { display: inline-flex; gap: 3px; }
+.dbg-hint { color: var(--muted); font-size: .76rem; }
+.dbg-bar .small { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.dbg-bar .small.active { background: var(--accent); color: var(--accent-text); }
+.dbg-bar [data-dbg="export"] { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+
 @keyframes pulse { 50% { stroke-opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .terr.candidate .token { animation: none; } }
 

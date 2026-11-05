@@ -3,6 +3,7 @@
 // ob die Aktion lokal oder über das Netzwerk läuft, entscheidet main.js.
 
 import { TERRITORIES, TERRITORY_BY_ID, CONTINENTS, CONTINENT_TERRITORIES, EDGES, MAP_SIZE } from './map.js';
+import { TERRITORY_SHAPES } from './shapes.js';
 import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
@@ -10,6 +11,15 @@ import {
 
 export const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// Debug-Modus per ?debug=1 in der URL: Raster, Koordinaten und Gebiets-IDs.
+const DEBUG = typeof location !== 'undefined' && new URLSearchParams(location.search).get('debug') === '1';
+
+// Auto-Speichern der Debug-Bearbeitung (Steine, Grenzen, Seewege) im Browser
+const DBG_KEY = 'wh-debug-map';
+const dbgLoad = () => { try { return JSON.parse(localStorage.getItem(DBG_KEY) || 'null'); } catch { return null; } };
+const dbgSave = (data) => { try { localStorage.setItem(DBG_KEY, JSON.stringify(data)); } catch { /* egal */ } };
+const dbgClear = () => { try { localStorage.removeItem(DBG_KEY); } catch { /* egal */ } };
 
 const PHASE_LABEL = {
   setup: 'Aufstellung',
@@ -36,6 +46,23 @@ export class GameView {
     this.amount = 1;
     this.moveCount = null;
     this.phaseKey = null;
+    this.debugPos = {}; // id -> {x,y} Overrides beim Verschieben im Debug-Modus
+    this.shapeOverride = {}; // id -> [[x,y],...] bearbeitete Landflächen
+    this.debugMode = 'tokens'; // 'tokens' | 'borders' | 'sea'
+    this.editId = null; // Gebiet, dessen Eckpunkte gerade bearbeitet werden
+    // Seewege (als dünne gestrichelte Linien gezeichnet), aus EDGES vorbelegt
+    this.seaRoutes = EDGES.filter((e) => e[2] === 'sea').map((e) => [e[0], e[1]]);
+    this.wrapRoutes = EDGES.filter((e) => e[2] === 'wrap').map((e) => [e[0], e[1]]);
+    this.seaFrom = null; // erster Klick im Wasserwege-Modus
+    // Gespeicherte Debug-Bearbeitung laden (nur im Debug-Modus, damit normales Spiel unberührt bleibt)
+    if (DEBUG) {
+      const saved = dbgLoad();
+      if (saved) {
+        this.debugPos = saved.debugPos || {};
+        this.shapeOverride = saved.shapeOverride || {};
+        if (Array.isArray(saved.seaRoutes)) this.seaRoutes = saved.seaRoutes;
+      }
+    }
 
     root.innerHTML = `
       <div class="game">
@@ -57,9 +84,12 @@ export class GameView {
       </div>`;
 
     this.$('map').addEventListener('click', (e) => {
+      if (this._suppressClick) { this._suppressClick = false; return; } // war ein Drag
+      if (DEBUG) this.debugClick(e);
       const g = e.target.closest('[data-terr]');
       if (g) this.onTerritory(g.dataset.terr);
     });
+    if (DEBUG) this.setupDebug();
     this.$('panel').addEventListener('click', (e) => {
       const b = e.target.closest('[data-act]');
       if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
@@ -235,6 +265,289 @@ export class GameView {
     }
   }
 
+  // Effektive Gebietsposition (Override im Debug-Modus, sonst aus der Karte)
+  posOf(id) {
+    return this.debugPos[id] ?? TERRITORY_BY_ID[id];
+  }
+
+  // Effektive Landfläche (Override im Debug-Modus, sonst aus shapes.js)
+  shapeOf(id) {
+    return this.shapeOverride[id] ?? TERRITORY_SHAPES[id] ?? [];
+  }
+
+  // Bearbeitbare Kopie der Landfläche sicherstellen (die Importe bleiben unangetastet)
+  ensureShape(id) {
+    if (!this.shapeOverride[id]) this.shapeOverride[id] = this.shapeOf(id).map((p) => [...p]);
+    return this.shapeOverride[id];
+  }
+
+  // Aktuelle Debug-Bearbeitung im Browser sichern
+  saveDebug() {
+    dbgSave({ debugPos: this.debugPos, shapeOverride: this.shapeOverride, seaRoutes: this.seaRoutes });
+  }
+
+  // Seewege als gestrichelte Linien: Wrap über den Kartenrand, sonst leichte Kurve
+  seaRoutesSvg() {
+    const W = MAP_SIZE.width;
+    let s = '';
+    for (const [a, b] of this.wrapRoutes) {
+      const A = this.posOf(a);
+      const B = this.posOf(b);
+      const ym = (A.y + B.y) / 2;
+      const [L, R] = A.x < B.x ? [A, B] : [B, A];
+      s += `<line class="sea-route" x1="${L.x}" y1="${L.y}" x2="0" y2="${ym}"/>`;
+      s += `<line class="sea-route" x1="${R.x}" y1="${R.y}" x2="${W}" y2="${ym}"/>`;
+    }
+    for (const [a, b] of this.seaRoutes) {
+      const A = this.posOf(a);
+      const B = this.posOf(b);
+      const dx = B.x - A.x;
+      const dy = B.y - A.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const off = Math.min(38, len * 0.14);
+      const cx = ((A.x + B.x) / 2 - (dy / len) * off).toFixed(1);
+      const cy = ((A.y + B.y) / 2 + (dx / len) * off).toFixed(1);
+      s += `<path class="sea-route" d="M${A.x},${A.y} Q${cx},${cy} ${B.x},${B.y}"/>`;
+    }
+    return s;
+  }
+
+  // Mausposition -> SVG-Koordinaten
+  svgCoords(e) {
+    const svg = this.$('map');
+    const m = svg.getScreenCTM();
+    if (!m) return null;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    const loc = pt.matrixTransform(m.inverse());
+    return { x: loc.x, y: loc.y };
+  }
+
+  // Debug-Toolbar + Zeiger-Listener einrichten
+  setupDebug() {
+    const bar = document.createElement('div');
+    bar.className = 'dbg-bar';
+    this.renderDebugBar(bar);
+    bar.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-dbg]')?.dataset.dbg;
+      if (act === 'export') this.debugExport();
+      else if (act === 'export-sea') this.debugExportSea();
+      else if (act === 'reset') {
+        if (!confirm('Alle gespeicherten Debug-Änderungen (Steine, Grenzen, Seewege) verwerfen und auf den Stand aus map.js/shapes.js zurücksetzen?')) return;
+        dbgClear();
+        this.debugPos = {};
+        this.shapeOverride = {};
+        this.seaRoutes = EDGES.filter((ed) => ed[2] === 'sea').map((ed) => [ed[0], ed[1]]);
+        this.editId = null;
+        this.seaFrom = null;
+        this.renderMap();
+      } else if (act && act.startsWith('mode-')) {
+        this.debugMode = act.slice(5); // tokens | borders | sea
+        this.editId = null;
+        this.seaFrom = null;
+        this.renderDebugBar(bar);
+        this.renderMap();
+      }
+    });
+    this.root.querySelector('.game').appendChild(bar);
+
+    const svg = this.$('map');
+    svg.addEventListener('pointerdown', (e) => this.debugPointerDown(e));
+    svg.addEventListener('pointermove', (e) => this.debugPointerMove(e));
+    svg.addEventListener('pointerup', (e) => this.debugPointerUp(e));
+    svg.addEventListener('pointercancel', (e) => this.debugPointerUp(e));
+    svg.addEventListener('contextmenu', (e) => this.debugContextMenu(e));
+  }
+
+  renderDebugBar(bar) {
+    const mode = this.debugMode;
+    const hints = {
+      tokens: 'Steine ziehen',
+      borders: 'Gebiet wählen · Eckpunkt ziehen · Kantenmitte = neuer Punkt · Rechtsklick löscht',
+      sea: 'Zwei Gebiete nacheinander klicken = Seeweg an/aus',
+    };
+    const btn = (m, label) => `<button class="small ${mode === m ? 'active' : ''}" data-dbg="mode-${m}">${label}</button>`;
+    bar.innerHTML = `
+      <span class="dbg-seg">${btn('tokens', 'Steine')}${btn('borders', 'Grenzen')}${btn('sea', 'Wasserwege')}</span>
+      <span class="dbg-hint">${hints[mode]}</span>
+      <button class="small" data-dbg="export-sea">Seewege</button>
+      <button class="small" data-dbg="export">Alles</button>
+      <button class="small ghost" data-dbg="reset">Zurücksetzen</button>`;
+  }
+
+  debugPointerDown(e) {
+    if (e.button != null && e.button !== 0) return; // nur linke Maustaste
+    if (this.debugMode === 'borders') return this.borderPointerDown(e);
+    if (this.debugMode === 'sea') return this.seaPointerDown(e);
+    // Steine-Modus: Token ziehen
+    const g = e.target.closest('[data-terr]');
+    if (!g) return;
+    const p = this.svgCoords(e);
+    if (!p) return;
+    const id = g.dataset.terr;
+    const cur = this.posOf(id);
+    this.drag = { kind: 'token', id, g, start: p, offX: cur.x - p.x, offY: cur.y - p.y, moved: false };
+    this.$('map').setPointerCapture(e.pointerId);
+  }
+
+  borderPointerDown(e) {
+    this._suppressClick = true; // im Grenzen-Modus keine Spielauswahl auslösen
+    const p = this.svgCoords(e);
+    if (!p) return;
+    const vEl = e.target.closest('.dbg-vertex');
+    const aEl = e.target.closest('.dbg-add');
+    if (vEl && this.editId) {
+      this.drag = { kind: 'vertex', id: this.editId, vi: +vEl.dataset.vi, start: p, moved: false };
+      this.$('map').setPointerCapture(e.pointerId);
+      return;
+    }
+    if (aEl && this.editId) {
+      const i = +aEl.dataset.ai;
+      const shape = this.ensureShape(this.editId);
+      const a = shape[i];
+      const b = shape[(i + 1) % shape.length];
+      shape.splice(i + 1, 0, [Math.round((a[0] + b[0]) / 2), Math.round((a[1] + b[1]) / 2)]);
+      this.drag = { kind: 'vertex', id: this.editId, vi: i + 1, start: p, moved: true };
+      this.renderMap();
+      this.$('map').setPointerCapture(e.pointerId);
+      return;
+    }
+    // sonst: Gebiet zum Bearbeiten auswählen (bzw. abwählen)
+    const g = e.target.closest('[data-terr]');
+    const id = g ? g.dataset.terr : null;
+    if (id !== this.editId) {
+      this.editId = id;
+      this.renderMap();
+    }
+  }
+
+  debugPointerMove(e) {
+    if (!this.drag) return;
+    const p = this.svgCoords(e);
+    if (!p) return;
+    if (Math.hypot(p.x - this.drag.start.x, p.y - this.drag.start.y) > 2) this.drag.moved = true;
+    if (this.drag.kind === 'token') {
+      const x = Math.round(p.x + this.drag.offX);
+      const y = Math.round(p.y + this.drag.offY);
+      this.debugPos[this.drag.id] = { x, y };
+      this.moveTokenDom(this.drag.g, x, y);
+    } else if (this.drag.kind === 'vertex') {
+      const shape = this.ensureShape(this.drag.id);
+      shape[this.drag.vi] = [Math.round(p.x), Math.round(p.y)];
+      this.renderMap();
+    }
+  }
+
+  debugPointerUp(e) {
+    if (!this.drag) return;
+    this.$('map').releasePointerCapture?.(e.pointerId);
+    if (this.drag.moved) { this._suppressClick = true; this.saveDebug(); }
+    this.drag = null;
+  }
+
+  seaPointerDown(e) {
+    this._suppressClick = true;
+    const g = e.target.closest('[data-terr]');
+    if (!g) { this.seaFrom = null; this.renderMap(); return; }
+    const id = g.dataset.terr;
+    if (!this.seaFrom || this.seaFrom === id) {
+      this.seaFrom = this.seaFrom === id ? null : id;
+    } else {
+      this.toggleSea(this.seaFrom, id);
+      this.seaFrom = null;
+      this.saveDebug();
+    }
+    this.renderMap();
+  }
+
+  toggleSea(a, b) {
+    const i = this.seaRoutes.findIndex(([x, y]) => (x === a && y === b) || (x === b && y === a));
+    if (i >= 0) this.seaRoutes.splice(i, 1);
+    else this.seaRoutes.push([a, b]);
+  }
+
+  debugContextMenu(e) {
+    if (this.debugMode !== 'borders') return;
+    const vEl = e.target.closest('.dbg-vertex');
+    if (!vEl || !this.editId) return;
+    e.preventDefault();
+    const shape = this.ensureShape(this.editId);
+    if (shape.length <= 3) return this.showError('Ein Gebiet braucht mindestens 3 Eckpunkte.');
+    shape.splice(+vEl.dataset.vi, 1);
+    this.saveDebug();
+    this.renderMap();
+  }
+
+  // Token-SVG-Elemente direkt verschieben (ohne Neuaufbau, flüssiges Ziehen)
+  moveTokenDom(g, x, y) {
+    const set = (sel, ax, ay) => { const el = g.querySelector(sel); if (el) { el.setAttribute('x', ax); el.setAttribute('y', ay); } };
+    const setC = (sel) => { const el = g.querySelector(sel); if (el) { el.setAttribute('cx', x); el.setAttribute('cy', y); } };
+    setC('.hit'); setC('.token');
+    set('.troops', x, y);
+    set('.tname', x, y + 21);
+  }
+
+  // Nur die Seewege als 'sea'-Kanten – unabhängig von Steinen/Grenzen
+  seaExportText() {
+    const seaLines = this.seaRoutes.map(([a, b]) => `  ['${a}', '${b}', 'sea'],`).join('\n');
+    return `// Seewege (${this.seaRoutes.length}) – in map.js EDGES als 'sea' eintragen:\n${seaLines}`;
+  }
+
+  debugExportSea() {
+    this.showExport(`Seewege-Export · ${this.seaRoutes.length} Verbindungen`, this.seaExportText());
+  }
+
+  // Komplett: TERRITORIES (x/y) + TERRITORY_SHAPES (Eckpunkte) + Seewege
+  debugExport() {
+    const terrLines = TERRITORIES.map((t) => {
+      const { x, y } = this.posOf(t.id);
+      return `  { id: '${t.id}', name: '${t.name}', continent: '${t.continent}', x: ${Math.round(x)}, y: ${Math.round(y)} },`;
+    }).join('\n');
+    const shapeLines = TERRITORIES.map((t) => {
+      const pts = this.shapeOf(t.id).map((p) => `[${Math.round(p[0])}, ${Math.round(p[1])}]`).join(', ');
+      return `  ${t.id}: [${pts}],`;
+    }).join('\n');
+    const text =
+      `export const TERRITORIES = [\n${terrLines}\n];\n\n` +
+      `export const TERRITORY_SHAPES = {\n${shapeLines}\n};\n\n` +
+      this.seaExportText();
+    this.showExport(`Komplett-Export · ${this.seaRoutes.length} Seewege`, text);
+  }
+
+  // Export-Fenster anzeigen + in die Zwischenablage kopieren + in die Konsole loggen
+  showExport(title, text) {
+    console.log(text);
+    navigator.clipboard?.writeText(text).catch(() => {});
+    let ov = this.root.querySelector('.dbg-export');
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.className = 'dbg-export';
+      this.root.querySelector('.game').appendChild(ov);
+    }
+    ov.innerHTML = `<div class="dbg-export-inner">
+      <div class="dbg-export-head"><strong>${esc(title)} · kopiert</strong>
+        <button class="small ghost" data-dbg="close">Schließen</button></div>
+      <textarea readonly>${esc(text)}</textarea></div>`;
+    ov.querySelector('[data-dbg="close"]').addEventListener('click', () => ov.remove());
+    const ta = ov.querySelector('textarea');
+    ta.focus();
+    ta.select();
+  }
+
+  // Debug: Klickposition in SVG-Koordinaten umrechnen, loggen und kopieren
+  debugClick(e) {
+    const p = this.svgCoords(e);
+    if (!p) return;
+    const x = Math.round(p.x);
+    const y = Math.round(p.y);
+    const text = `x: ${x}, y: ${y}`;
+    const g = e.target.closest('[data-terr]');
+    console.log(`[debug] ${text}${g ? `  (${g.dataset.terr})` : ''}`);
+    navigator.clipboard?.writeText(text).catch(() => {});
+    this.showError(`📋 ${text}`);
+  }
+
   showError(msg) {
     const el = this.$('toast');
     el.textContent = msg;
@@ -282,32 +595,23 @@ export class GameView {
           <path d="M0,0 L10,5 L0,10 z" fill="#ffffff"/>
         </marker>
       </defs>
-      <rect class="sea" width="${W}" height="${H}"/>`;
+      <rect class="sea" width="${W}" height="${H}"/>
+      <image href="assets/weltkarte.svg" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none"/>`;
 
-    // Gradnetz für den Landkarten-Look
-    for (let x = 100; x < W; x += 100) out += `<line class="graticule" x1="${x}" y1="0" x2="${x}" y2="${H}"/>`;
-    for (let y = 90; y < H; y += 90) out += `<line class="graticule" x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
-
-    // Kontinente als weiche Flächen
-    for (const [cid, c] of Object.entries(CONTINENTS)) {
-      out += `<g class="continent" fill="${c.color}">`;
-      for (const tid of CONTINENT_TERRITORIES[cid]) out += `<circle cx="${TB[tid].x}" cy="${TB[tid].y}" r="50"/>`;
-      out += `</g>`;
-      out += `<text class="cont-label" x="${c.label.x}" y="${c.label.y}" fill="${c.color}">${esc(c.name)} +${c.bonus}</text>`;
+    // Debug-Raster: 50-px-Gitter mit Koordinaten an den Achsen
+    if (DEBUG) {
+      for (let x = 0; x <= W; x += 50) out += `<line class="dbg-grid${x % 100 === 0 ? ' major' : ''}" x1="${x}" y1="0" x2="${x}" y2="${H}"/>`;
+      for (let y = 0; y <= H; y += 50) out += `<line class="dbg-grid${y % 100 === 0 ? ' major' : ''}" x1="0" y1="${y}" x2="${W}" y2="${y}"/>`;
+      for (let x = 0; x <= W; x += 50) out += `<text class="dbg-axis" x="${x + 2}" y="11">${x}</text>`;
+      for (let y = 50; y <= H; y += 50) out += `<text class="dbg-axis" x="3" y="${y - 3}">${y}</text>`;
     }
 
-    // Verbindungen
-    for (const [a, b, kind] of EDGES) {
-      const A = TB[a];
-      const B = TB[b];
-      if (kind === 'wrap') {
-        const ym = (A.y + B.y) / 2;
-        const [L, R] = A.x < B.x ? [A, B] : [B, A];
-        out += `<line class="edge sea-route" x1="${L.x}" y1="${L.y}" x2="0" y2="${ym}"/>`;
-        out += `<line class="edge sea-route" x1="${R.x}" y1="${R.y}" x2="${W}" y2="${ym}"/>`;
-      } else {
-        out += `<line class="edge${kind === 'sea' ? ' sea-route' : ''}" x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}"/>`;
-      }
+    // Seewege (gestrichelt) – Landgrenzen zeigt das aneinanderliegende Land selbst
+    out += this.seaRoutesSvg();
+
+    // Kontinent-Boni als Beschriftung
+    for (const c of Object.values(CONTINENTS)) {
+      out += `<text class="cont-label" x="${c.label.x}" y="${c.label.y}">${esc(c.name)} +${c.bonus}</text>`;
     }
 
     // Letzter Angriff als Pfeil
@@ -350,17 +654,35 @@ export class GameView {
         this.sel.to === t.id && (s.phase === 'attack' ? 'target' : 'selected'),
         (targets.has(t.id) || reach.has(t.id)) && this.sel.to !== t.id && 'candidate',
         pm && (pm.from === t.id || pm.to === t.id) && 'selected',
+        DEBUG && this.debugMode === 'borders' && this.editId === t.id && 'editing',
+        DEBUG && this.debugMode === 'sea' && this.seaFrom === t.id && 'selected',
       ]
         .filter(Boolean)
         .join(' ');
+      const { x: tx, y: ty } = this.posOf(t.id);
+      const pts = this.shapeOf(t.id).map((p) => p.join(',')).join(' ');
       out += `
         <g class="${cls}" data-terr="${t.id}">
-          <circle class="hit" cx="${t.x}" cy="${t.y}" r="28" fill="rgba(0,0,0,0)"/>
-          <circle class="token" cx="${t.x}" cy="${t.y}" r="19" fill="${owner.color}"/>
-          <text class="troops" x="${t.x}" y="${t.y + 5}" fill="${textColorFor(owner.color)}">${st.troops}</text>
-          <text class="tname" x="${t.x}" y="${t.y + 34}">${esc(t.name)}</text>
+          <polygon class="land" points="${pts}" fill="${CONTINENTS[t.continent].land}"/>
+          <circle class="hit" cx="${tx}" cy="${ty}" r="15" fill="rgba(0,0,0,0)"/>
+          <circle class="token" cx="${tx}" cy="${ty}" r="10" fill="${owner.color}"/>
+          <text class="troops" x="${tx}" y="${ty}" fill="${textColorFor(owner.color)}">${st.troops}</text>
+          <text class="tname" x="${tx}" y="${ty + 21}">${esc(t.name)}</text>
           <title>${esc(t.name)} – ${esc(owner.name)}, ${st.troops} Truppe(n)</title>
         </g>`;
+    }
+
+    // Debug „Grenzen": Eckpunkt-Griffe + Kantenmitten für das aktive Gebiet
+    if (DEBUG && this.debugMode === 'borders' && this.editId) {
+      const shape = this.shapeOf(this.editId);
+      for (let i = 0; i < shape.length; i++) {
+        const a = shape[i];
+        const b = shape[(i + 1) % shape.length];
+        out += `<circle class="dbg-add" data-ai="${i}" cx="${(a[0] + b[0]) / 2}" cy="${(a[1] + b[1]) / 2}" r="4"/>`;
+      }
+      shape.forEach((p, i) => {
+        out += `<circle class="dbg-vertex" data-vi="${i}" cx="${p[0]}" cy="${p[1]}" r="5"/>`;
+      });
     }
 
     this.$('map').innerHTML = out;

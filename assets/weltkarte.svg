@@ -1,0 +1,317 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="540" viewBox="0 0 1000 540">
+<title>RISKIO – klassische Weltkarte mit exakt 42 Risiko-Gebieten</title>
+<desc>Vektorbasierte historische Spielkarte. Enthält die 42 klassischen Risiko-Territorien und deren 83 klassische Gebietsverbindungen.</desc>
+<defs>
+ <linearGradient id="parchment" x2="0" y2="1"><stop stop-color="#e9ddbf"/><stop offset="1" stop-color="#c9b58c"/></linearGradient>
+ <linearGradient id="ocean" x2="0" y2="1"><stop stop-color="#627a79"/><stop offset="1" stop-color="#405957"/></linearGradient>
+ <pattern id="grain" width="29" height="23" patternUnits="userSpaceOnUse">
+  <path d="M2 6l8 -1m8 12l8 -2m-4 -11l5 1" stroke="#76664a" stroke-width=".6" opacity=".22"/>
+  <circle cx="13" cy="8" r=".7" fill="#76664a" opacity=".2"/>
+ </pattern>
+ <pattern id="waves" width="38" height="26" patternUnits="userSpaceOnUse">
+  <path d="M0 9q9 -4 19 0t19 0M0 21q9 -4 19 0t19 0" fill="none" stroke="#d4d0b4" stroke-width=".6" opacity=".19"/>
+ </pattern>
+ <filter id="softshadow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3"/></filter>
+</defs>
+<rect width="1000" height="540" fill="#272c29"/>
+<rect x="7" y="7" width="986" height="526" rx="5" fill="url(#parchment)" stroke="#4c4030" stroke-width="4"/>
+<rect x="16" y="16" width="968" height="508" fill="url(#ocean)" stroke="#8a7651" stroke-width="1.5"/>
+<rect x="16" y="16" width="968" height="508" fill="url(#waves)"/>
+<rect x="16" y="16" width="968" height="508" fill="url(#grain)" opacity=".4"/>
+
+<path d="M55 18 Q33 270 55 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M130 18 Q108 270 130 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M205 18 Q183 270 205 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M280 18 Q258 270 280 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M355 18 Q333 270 355 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M430 18 Q408 270 430 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M505 18 Q483 270 505 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M580 18 Q558 270 580 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M655 18 Q633 270 655 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M730 18 Q708 270 730 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M805 18 Q783 270 805 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M880 18 Q858 270 880 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M955 18 Q933 270 955 522" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 55 Q500 65 982 55" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 120 Q500 130 982 120" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 185 Q500 195 982 185" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 250 Q500 260 982 250" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 315 Q500 325 982 315" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 380 Q500 390 982 380" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 445 Q500 455 982 445" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+<path d="M18 510 Q500 520 982 510" fill="none" stroke="#e1d5b6" stroke-width=".55" opacity=".25"/>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<g fill="#e5d7b8" font-family="Georgia,serif" font-style="italic" letter-spacing="2.4" opacity=".78">
+<text x="345" y="288" font-size="12" text-anchor="middle">OCEANUS ATLANTICUS</text>
+<text x="770" y="490" font-size="10" text-anchor="middle">OCEANUS PACIFICUS</text>
+<text x="586" y="490" font-size="10" text-anchor="middle">OCEANUS INDICUS</text>
+</g>
+<g transform="translate(66 66)" stroke="#e8d8b5" fill="none" stroke-width="1.1"><circle r="30"/><circle r="24" opacity=".6"/><path d="M0 -27L5 0 0 27 -5 0Z M-27 0L0 -5 27 0 0 5Z" fill="#d4bd8c" opacity=".8"/><path d="M0 -35V35 M-35 0H35" opacity=".7"/></g>
+<g fill="#e8d8b5" font-family="Georgia,serif" font-size="9" text-anchor="middle"><text x="66" y="23">N</text><text x="66" y="111">S</text><text x="22" y="69">W</text><text x="110" y="69">O</text></g>
+<path d="M29 482 L29 511 L330 511 L330 482 Q180 465 29 482Z" fill="#39372e" stroke="#b79b68" stroke-width="1.2"/>
+<text x="43" y="501" font-family="Georgia,serif" font-size="19" font-weight="bold" letter-spacing="3" fill="#e6d8b9">RISKIO</text>
+
+<g font-family="Georgia,serif" font-size="7" fill="#e6d8b9">
+
+</g>
+<rect x="22" y="22" width="956" height="496" fill="none" stroke="#d4c39d" stroke-width=".8"/>
+<path d="M27 27h28 M27 27v28 M973 27h-28 M973 27v28 M27 513h28 M27 513v-28 M973 513h-28 M973 513v-28" stroke="#b99b65" stroke-width="2.5" fill="none"/>
+
+
+
+
+</svg>
