@@ -48,6 +48,7 @@ const app = {
   status: '',
   ping: null,
   ordenMode: 'static', // Orden-Belohnung: 'static' | 'dynamic' (vor Spielstart wählbar)
+  missions: true, // Missionen (nur wirksam ab 3 Spielern)
 };
 
 // ================================================================== Start
@@ -93,6 +94,10 @@ function showStart(error = '') {
           <option value="static">Orden: statisch</option>
           <option value="dynamic">Orden: dynamisch</option>
         </select>
+        <select id="localMissions" title="Missionen (ab 3 Spielern)">
+          <option value="on">Missionen: an</option>
+          <option value="off">Missionen: aus</option>
+        </select>
         <button class="secondary" data-act="local">Starten</button></div>
       </section>
       <p class="error">${esc(error)}</p>
@@ -120,7 +125,7 @@ function showStart(error = '') {
         if (code.length !== 6) return showStart('Bitte einen gültigen Raum-Code eingeben (4 Buchstaben + 2 Ziffern).');
         startClient(code, readName());
       }
-      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value), main.querySelector('#localOrden').value);
+      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value), main.querySelector('#localOrden').value, main.querySelector('#localMissions').value === 'on');
     } catch (err) {
       showStart(err.message);
     }
@@ -283,7 +288,7 @@ function hostStartGame() {
   const players = app.lobby.filter((p) => p.connected);
   if (players.length < MIN_PLAYERS) return;
   app.lobby = players;
-  app.state = createGame(players.map(({ id, name }) => ({ id, name })), Math.random, { ordenMode: app.ordenMode });
+  app.state = createGame(players.map(({ id, name }) => ({ id, name })), Math.random, { ordenMode: app.ordenMode, missions: app.missions });
   hostChanged();
   showGame();
 }
@@ -333,9 +338,9 @@ function clientOnMessage(msg) {
 
 // ================================================================== Lokal (Hot-Seat)
 
-function startLocal(count, ordenMode = 'static') {
+function startLocal(count, ordenMode = 'static', missions = true) {
   const players = Array.from({ length: count }, (_, i) => ({ id: `p${i + 1}`, name: `Spieler ${i + 1}` }));
-  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players, Math.random, { ordenMode }) });
+  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players, Math.random, { ordenMode, missions }) });
   showGame();
 }
 
@@ -430,6 +435,12 @@ function renderLobby() {
                  <option value="dynamic"${app.ordenMode === 'dynamic' ? ' selected' : ''}>dynamisch (steigt je Einlösung)</option>
                </select>
              </label>
+             <label class="field">Missionen
+               <select id="missionsMode">
+                 <option value="on"${app.missions ? ' selected' : ''}>an (geheime Ziele, ab 3 Spielern)</option>
+                 <option value="off"${app.missions ? '' : ' selected'}>aus (klassischer Sieg: alle Gebiete)</option>
+               </select>
+             </label>
            </section>
            <button data-act="start" ${online < MIN_PLAYERS ? 'disabled' : ''}>Spiel starten</button>
            <p class="hint">Teile den Code mit deinen Freunden. Mindestens ${MIN_PLAYERS} Spieler.</p>`
@@ -439,6 +450,8 @@ function renderLobby() {
 
   const ordenSel = root.querySelector('#ordenMode');
   if (ordenSel) ordenSel.addEventListener('change', (e) => { app.ordenMode = e.target.value; });
+  const missionsSel = root.querySelector('#missionsMode');
+  if (missionsSel) missionsSel.addEventListener('change', (e) => { app.missions = e.target.value === 'on'; });
 
   root.querySelector('main').addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-act]');

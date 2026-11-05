@@ -1,11 +1,12 @@
 // Ausführen mit: npm test   (bzw. node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TERRITORIES, ADJACENCY, EDGES, CONTINENTS, TERRITORY_BY_ID } from '../js/map.js';
+import { TERRITORIES, ADJACENCY, EDGES, CONTINENTS, CONTINENT_TERRITORIES, TERRITORY_BY_ID } from '../js/map.js';
 import {
   createGame, applyAction, currentPlayerId, countTerritories, calcReinforcements,
   validAttackTargets, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
+  missionGoalMet, missionProgress, buildMissionPool,
 } from '../js/rules.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
@@ -263,12 +264,118 @@ test('viewFor: fremde Geheimnisse (Mission, Depeschen, Wahl, stats, private Logs
   assert.equal(s.log.filter((e) => e.text === 'privat für p0').length, 1);
 });
 
+// ------------------------------------------------------------------ Missionen
+
+const giveContinents = (s, pid, cids) => {
+  for (const cid of cids) for (const tid of CONTINENT_TERRITORIES[cid]) s.territories[tid] = { owner: pid, troops: 1 };
+};
+
+test('Missionen: Auswahl – 2 Optionen je Spieler, keine Selbst-Vernichtung, eindeutig', () => {
+  for (let n = 3; n <= MAX_PLAYERS; n++) {
+    const s = createGame(players(n), seeded(100 + n), { missions: true });
+    assert.equal(s.missions, true);
+    const all = [];
+    for (const p of s.players) {
+      assert.equal(p.mission, null, 'noch nicht gewählt');
+      assert.equal(p.missionOptions.length, 2, '2 Optionen zur Wahl');
+      for (const m of p.missionOptions) {
+        assert.notEqual(m.id, `v_${p.id}`, 'keine Vernichtung gegen sich selbst');
+        all.push(m.id);
+      }
+    }
+    assert.equal(new Set(all).size, all.length, 'Optionen ohne Zurücklegen (keine Duplikate)');
+  }
+  // Pool-Größe (ohne General): 6 Kontinent + 2 Gebiet + n Vernichtung
+  assert.equal(buildMissionPool(['p1', 'p2', 'p3']).length, 6 + 2 + 3);
+  // 2 Spieler -> keine Missionen
+  const s2 = createGame(players(2), seeded(7), { missions: true });
+  assert.equal(s2.missions, false);
+  assert.ok(!s2.players[0].missionOptions);
+});
+
+test('Missionen: chooseMission – gültige Wahl, unabhängig vom Zug, Fehlerfälle', () => {
+  const s = createGame(players(3), seeded(101), { missions: true });
+  // ein Nicht-aktueller Spieler darf trotzdem wählen
+  const other = s.order[(s.order.indexOf(currentPlayerId(s)) + 1) % 3];
+  const opt = s.players.find((p) => p.id === other).missionOptions;
+  // ungültige id (steht nicht zur Wahl)
+  assert.match(applyAction(s, { type: 'chooseMission', id: 'gibtsnicht' }, other).error, /zur Wahl/);
+  // gültige Wahl
+  const r = act(s, { type: 'chooseMission', id: opt[0].id }, other);
+  const p = r.players.find((x) => x.id === other);
+  assert.equal(p.mission.id, opt[0].id);
+  assert.equal(p.missionOptions, null);
+  // kein zweites Mal
+  assert.match(applyAction(r, { type: 'chooseMission', id: opt[1].id }, other).error, /bereits/);
+  // fremde Optionen sind in viewFor nicht sichtbar
+  const v = viewFor(s, currentPlayerId(s));
+  assert.equal(v.players.find((x) => x.id === other).missionOptions, undefined);
+});
+
+test('Missionen: Endziel Kontinent & Weltmacht lösen Sieg aus', () => {
+  // Kontinent k_na_af: Nordamerika + Afrika komplett -> met
+  let s = createGame(players(3), seeded(110), { missions: true });
+  const pid = s.players[0].id;
+  s.players[0].mission = { id: 'k_na_af' };
+  assert.equal(missionGoalMet(s, pid), false);
+  giveContinents(s, pid, ['nordamerika', 'afrika']);
+  assert.equal(missionGoalMet(s, pid), true);
+  assert.equal(missionProgress(s, pid).goal.met, true);
+
+  // Weltmacht end-to-end: 28 Gebiete (3 Spieler) -> Sieg nach einer Aktion
+  let s2 = createGame(players(3), seeded(111), { missions: true });
+  const wid = s2.players[0].id;
+  s2.players[0].mission = { id: 'g_weltmacht' };
+  const terr = Object.keys(s2.territories);
+  terr.forEach((t, i) => { s2.territories[t] = { owner: i < 28 ? wid : s2.players[1].id, troops: 1 }; });
+  s2.phase = 'reinforce';
+  s2.current = s2.order.indexOf(wid);
+  s2.reinforcements = 1;
+  const own = terr.find((t) => s2.territories[t].owner === wid);
+  const r = applyAction(s2, { type: 'place', territory: own, count: 1 }, wid);
+  assert.ifError(r.error);
+  assert.equal(r.state.phase, 'gameover');
+  assert.equal(r.state.winner, wid);
+});
+
+test('Vernichtung: Ausfallregel bei Fremd-Ausschaltung wechselt privat auf Weltmacht', () => {
+  let s = createGame(players(3), seeded(112), { missions: true });
+  const [p0, p1, p2] = s.players;
+  p0.mission = { id: `v_${p2.id}`, target: p2.id };
+  p1.mission = { id: 'g_bollwerk' };
+  p2.mission = { id: 'k_na_af' };
+  const terr = Object.keys(s.territories);
+  const x = terr[0];
+  const y = ADJACENCY[x][0];
+  const z = terr.find((t) => t !== x && t !== y);
+  for (const t of terr) s.territories[t] = { owner: p1.id, troops: 1 };
+  s.territories[x] = { owner: p2.id, troops: 1 };
+  s.territories[y] = { owner: p1.id, troops: 5 };
+  s.territories[z] = { owner: p0.id, troops: 1 };
+  s.phase = 'attack';
+  s.current = s.order.indexOf(p1.id);
+  s.pendingMove = null;
+  s.conqueredThisTurn = false;
+  const r = applyAction(s, { type: 'blitz', from: y, to: x }, p1.id, diceSeq([6, 6, 6, 1, 1]));
+  assert.ifError(r.error);
+  assert.equal(r.state.players.find((p) => p.id === p2.id).alive, false);
+  assert.equal(r.state.players.find((p) => p.id === p0.id).mission.id, 'g_weltmacht');
+  // privates Log ist für andere nicht sichtbar
+  assert.ok(!viewFor(r.state, p1.id).log.some((e) => e.text.includes('Vernichtungs-Mission ist hinfällig')));
+  assert.ok(viewFor(r.state, p0.id).log.some((e) => e.text.includes('Vernichtungs-Mission ist hinfällig')));
+});
+
 // ------------------------------------------------------------------ Simulation
 
 function botAction(s, rng) {
   const pid = currentPlayerId(s);
   const own = Object.keys(s.territories).filter((id) => s.territories[id].owner === pid);
   const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+  // Missionswahl zuerst erledigen, wenn noch offen (unabhängig von der Phase)
+  const self = s.players.find((p) => p.id === pid);
+  if (s.missions && self.missionOptions && !self.mission) {
+    return { type: 'chooseMission', id: pick(self.missionOptions).id };
+  }
   switch (s.phase) {
     case 'setup':
       return { type: 'place', territory: pick(own), count: 1 };
@@ -314,7 +421,8 @@ test('Simulation: 60 Zufallspartien mit 2–7 Bots verletzen keine Invarianten',
   let finished = 0;
   for (let g = 0; g < 60; g++) {
     const rng = seeded(1000 + g);
-    let s = createGame(players(2 + (g % 6)), rng, { ordenMode: g % 2 ? 'dynamic' : 'static' });
+    const n = 2 + (g % 6);
+    let s = createGame(players(n), rng, { ordenMode: g % 2 ? 'dynamic' : 'static', missions: g % 3 !== 0 });
     for (let i = 0; i < 30000 && s.phase !== 'gameover'; i++) {
       const action = botAction(s, rng);
       const r = applyAction(s, action, currentPlayerId(s), rng);
@@ -324,7 +432,11 @@ test('Simulation: 60 Zufallspartien mit 2–7 Bots verletzen keine Invarianten',
     }
     if (s.phase === 'gameover') {
       finished++;
-      assert.equal(countTerritories(s, s.winner), TERRITORIES.length);
+      // Sieg entweder durch Komplett-Eroberung oder durch erfülltes Missionsziel
+      assert.ok(
+        countTerritories(s, s.winner) === TERRITORIES.length || (s.missions && missionGoalMet(s, s.winner)),
+        `Sieg ohne gültige Bedingung (Partie ${g})`,
+      );
     }
   }
   assert.ok(finished > 0, 'keine einzige Partie wurde beendet');

@@ -58,7 +58,9 @@ export function viewFor(state, playerId) {
   v.log = (v.log || []).filter((e) => !e.visibleTo || e.visibleTo.includes(playerId));
   for (const p of v.players || []) {
     if (p.id === playerId) continue; // eigene Infos bleiben vollständig
+    if (v.phase === 'gameover' && p.id === v.winner) continue; // Sieger-Mission wird aufgedeckt
     delete p.mission; // sichtbar bleiben nur p.stagesDone und p.pillory (öffentlich)
+    delete p.missionOptions; // zur Wahl stehende Missionen sind geheim
     delete p.stats;
     delete p.depeschenChoice;
     if (Array.isArray(p.depeschen)) {
@@ -67,6 +69,174 @@ export function viewFor(state, playerId) {
     }
   }
   return v;
+}
+
+// ---------------------------------------------------------------- Missionen
+export const MISSION_MIN_PLAYERS = 3;
+export const MISSION_STAGE_BONUS = 2;
+export const MISSION_TARGETS = {
+  g_weltmacht: { stage1Conquests: 3, stage2: { 3: 22, default: 18 }, goal: { 3: 28, default: 24 } },
+  g_bollwerk: { stage1Defends: 2, stage2: { 3: 17, default: 14 }, goal: { 3: 22, default: 18 }, minTroops: 2 },
+  vernichtung: { stage1From: 2, stage2MaxTerritories: 4 },
+  kontinent: { stage1Conquests: 2 },
+  feldherr: { stage1GeneralConquests: 3, stage2Continents: 2, goalContinents: 3 },
+};
+
+const KONTINENT_MISSIONS = {
+  k_na_af: ['nordamerika', 'afrika'],
+  k_na_oz: ['nordamerika', 'ozeanien'],
+  k_as_sa: ['asien', 'suedamerika'],
+  k_as_af: ['asien', 'afrika'],
+  k_eu_sa_x: ['europa', 'suedamerika'], // + 1 beliebiger weiterer
+  k_eu_oz_x: ['europa', 'ozeanien'],
+};
+const KONTINENT_EXTRA = new Set(['k_eu_sa_x', 'k_eu_oz_x']);
+
+const scaled = (obj, n) => (n === 3 ? obj[3] : obj.default);
+const continentComplete = (s, pid, cid) => CONTINENT_TERRITORIES[cid].every((tid) => s.territories[tid].owner === pid);
+const completedContinents = (s, pid) => Object.keys(CONTINENTS).filter((cid) => continentComplete(s, pid, cid));
+function countTerritoriesWithTroops(s, pid, min) {
+  let n = 0;
+  for (const t of Object.values(s.territories)) if (t.owner === pid && t.troops >= min) n++;
+  return n;
+}
+
+/** Baut den Missions-Pool (§4). `general` zieht die Feldherr-Mission mit hinein. */
+export function buildMissionPool(playerIds, options = {}) {
+  return [
+    ...Object.keys(KONTINENT_MISSIONS).map((id) => ({ id })),
+    { id: 'g_weltmacht' },
+    { id: 'g_bollwerk' },
+    ...(options.general ? [{ id: 'f_feldherr' }] : []),
+    ...playerIds.map((pid) => ({ id: `v_${pid}`, target: pid })),
+  ];
+}
+
+// Jeder bekommt zur Spielwahl 2 Missionen (verdeckt, ohne Zurücklegen); nie die
+// eigene Vernichtungs-Mission. Mathematisch bleiben bei ≤7 Spielern stets ≥2
+// zulässige Karten übrig, da jeder höchstens eine unzulässige Karte (v_self) hat.
+function assignMissionChoices(playerIds, rng, options) {
+  const pool = shuffle(buildMissionPool(playerIds, options), rng);
+  const out = {};
+  for (const pid of playerIds) {
+    const picked = [];
+    for (let k = 0; k < pool.length && picked.length < 2; k++) {
+      if (pool[k].target === pid) continue;
+      picked.push(pool.splice(k, 1)[0]);
+      k--;
+    }
+    out[pid] = picked;
+  }
+  return out;
+}
+
+/** Eine zur Wahl stehende Mission annehmen (unabhängig vom Zug, §6.2-Stil). */
+function chooseMission(s, pid, id) {
+  if (!s.missions) return 'Missionen sind in dieser Partie nicht aktiv.';
+  const p = playerById(s, pid);
+  if (!p) return 'Unbekannter Spieler.';
+  if (p.mission) return 'Du hast deine Mission bereits gewählt.';
+  const chosen = (p.missionOptions || []).find((m) => m.id === id);
+  if (!chosen) return 'Diese Mission steht dir nicht zur Wahl.';
+  p.mission = chosen;
+  p.missionOptions = null;
+  addLog(s, `Du hast deine Mission gewählt: ${missionName(chosen, s)}.`, [pid]);
+  return null;
+}
+
+export function missionName(mission, state) {
+  if (!mission) return '';
+  const id = mission.id;
+  if (id in KONTINENT_MISSIONS) {
+    return `Kontinente: ${KONTINENT_MISSIONS[id].map((c) => CONTINENTS[c].name).join(' + ')}${KONTINENT_EXTRA.has(id) ? ' + 1 weiterer' : ''}`;
+  }
+  if (id === 'g_weltmacht') return 'Weltmacht';
+  if (id === 'g_bollwerk') return 'Bollwerk';
+  if (mission.target) return `Vernichtung: ${state ? playerName(state, mission.target) : mission.target}`;
+  if (id === 'f_feldherr') return 'Feldherr';
+  return id;
+}
+
+/** Ist das Endziel einer Mission aktuell erfüllt? (rein; mission default = die zugeteilte) */
+export function missionGoalMet(s, pid, mission = playerById(s, pid)?.mission) {
+  if (!mission) return false;
+  const id = mission.id;
+  const n = s.order.length;
+  if (id in KONTINENT_MISSIONS) {
+    const fixed = KONTINENT_MISSIONS[id];
+    if (!fixed.every((c) => continentComplete(s, pid, c))) return false;
+    if (KONTINENT_EXTRA.has(id)) return completedContinents(s, pid).some((c) => !fixed.includes(c));
+    return true;
+  }
+  if (id === 'g_weltmacht') return countTerritories(s, pid) >= scaled(MISSION_TARGETS.g_weltmacht.goal, n);
+  if (id === 'g_bollwerk') return countTerritoriesWithTroops(s, pid, MISSION_TARGETS.g_bollwerk.minTroops) >= scaled(MISSION_TARGETS.g_bollwerk.goal, n);
+  if (mission.target) {
+    const x = playerById(s, mission.target);
+    return !!x && !x.alive && x.eliminatedBy === pid;
+  }
+  if (id === 'f_feldherr') {
+    const comp = completedContinents(s, pid);
+    return comp.length >= MISSION_TARGETS.feldherr.goalContinents && comp.some((c) => ['nordamerika', 'europa', 'asien'].includes(c));
+  }
+  return false;
+}
+
+/** Anzeige-Fortschritt einer Mission (rein; mission default = die zugeteilte). */
+export function missionProgress(s, pid, mission = playerById(s, pid)?.mission) {
+  if (!mission) return null;
+  const m = mission;
+  const id = m.id;
+  const n = s.order.length;
+  const T = MISSION_TARGETS;
+  let stage1, stage2, goal;
+
+  if (id in KONTINENT_MISSIONS) {
+    const fixed = KONTINENT_MISSIONS[id];
+    const prog = (c) => {
+      const list = CONTINENT_TERRITORIES[c];
+      const own = list.filter((tid) => s.territories[tid].owner === pid).length;
+      return `${CONTINENTS[c].name} ${own}/${list.length}`;
+    };
+    stage1 = { text: 'In einem Zug 2 Gebiete in den Zielkontinenten erobern' };
+    stage2 = { text: 'Einen Zielkontinent komplett', detail: fixed.map(prog).join(' · ') };
+    goal = { text: `Alle Zielkontinente komplett${KONTINENT_EXTRA.has(id) ? ' (+1 weiterer)' : ''}`, detail: fixed.map(prog).join(' · '), met: missionGoalMet(s, pid, m) };
+  } else if (id === 'g_weltmacht') {
+    const c = countTerritories(s, pid);
+    stage1 = { text: 'In einem Zug 3 Gebiete erobern' };
+    stage2 = { text: 'Gebiete besitzen', detail: `${c}/${scaled(T.g_weltmacht.stage2, n)}` };
+    goal = { text: 'Gebiete besitzen', detail: `${c}/${scaled(T.g_weltmacht.goal, n)}`, met: missionGoalMet(s, pid, m) };
+  } else if (id === 'g_bollwerk') {
+    const c = countTerritoriesWithTroops(s, pid, T.g_bollwerk.minTroops);
+    stage1 = { text: '2 Angriffe abwehren (seit deinem letzten Zug)' };
+    stage2 = { text: 'Gebiete mit ≥ 2 Truppen', detail: `${c}/${scaled(T.g_bollwerk.stage2, n)}` };
+    goal = { text: 'Gebiete mit ≥ 2 Truppen', detail: `${c}/${scaled(T.g_bollwerk.goal, n)}`, met: missionGoalMet(s, pid, m) };
+  } else if (m.target) {
+    const xn = playerName(s, m.target);
+    const x = playerById(s, m.target);
+    stage1 = { text: `In einem Zug 2 Gebiete von ${xn} erobern` };
+    stage2 = { text: `${xn} auf ≤ ${T.vernichtung.stage2MaxTerritories} Gebiete drücken`, detail: `${xn}: ${x ? countTerritories(s, m.target) : 0} Gebiete` };
+    goal = { text: `${xn} ausschalten`, met: missionGoalMet(s, pid, m) };
+  } else if (id === 'f_feldherr') {
+    stage1 = { text: 'General an 3 Eroberungen beteiligt' };
+    stage2 = { text: '2 Kontinente gleichzeitig', detail: `${completedContinents(s, pid).length} komplett` };
+    goal = { text: '3 Kontinente (einer aus NA/EU/AS)', met: missionGoalMet(s, pid, m) };
+  }
+  return { id, name: missionName(m, s), stage1, stage2, goal };
+}
+
+function checkMissionVictory(s, pid) {
+  if (!s.missions || s.phase === 'gameover') return;
+  if (missionGoalMet(s, pid)) {
+    // Einen noch offenen Nachrück-Vorgang abschließen, damit kein Gebiet auf 0 steht
+    if (s.pendingMove) {
+      const pm = s.pendingMove;
+      moveTroops(s.territories[pm.from], s.territories[pm.to], pm.min);
+    }
+    s.winner = pid;
+    s.phase = 'gameover';
+    s.pendingMove = null;
+    addLog(s, `🏆 ${playerName(s, pid)} erfüllt seine Mission: ${missionName(playerById(s, pid).mission, s)}!`);
+  }
 }
 
 const LOG_LIMIT = 150;
@@ -197,7 +367,19 @@ export function createGame(players, rng = Math.random, options = {}) {
   const start = START_ARMIES[players.length];
   for (const pid of order) state.setupRemaining[pid] = Math.max(0, start - countTerritories(state, pid));
 
+  // Missionen nur ab 3 Spielern und wenn aktiviert; jeder zieht verdeckt eine
+  state.missions = options.missions === true && players.length >= MISSION_MIN_PLAYERS;
+  if (state.missions) {
+    const choices = assignMissionChoices(order, rng, options);
+    for (const p of state.players) {
+      p.missionOptions = choices[p.id]; // 2 zur Auswahl, bis gewählt wird
+      p.mission = null;
+      p.stagesDone = [false, false]; // Etappen-Tracking folgt in Schritt 3
+    }
+  }
+
   addLog(state, `Spiel gestartet. Reihenfolge: ${order.map((id) => playerName(state, id)).join(', ')}.`);
+  if (state.missions) addLog(state, 'Missionen aktiv: Jeder wählt zu Beginn eine aus zwei geheimen Missionen.');
   addLog(state, `Aufstellung: Jeder setzt reihum bis zu ${SETUP_BATCH} Truppen.`);
   if (state.setupRemaining[order[0]] === 0) advanceSetup(state);
   return state;
@@ -311,9 +493,19 @@ function conquer(s, fromId, toId, dice, pid) {
   addLog(s, `${playerName(s, pid)} erobert ${territoryName(toId)}!`);
 
   if (countTerritories(s, prevOwner) === 0) {
-    const p = playerById(s, prevOwner);
-    p.alive = false;
-    addLog(s, `${p.name} wurde ausgeschaltet.`);
+    const dead = playerById(s, prevOwner);
+    dead.alive = false;
+    dead.eliminatedBy = pid; // für Vernichtungs-Missionen
+    addLog(s, `${dead.name} wurde ausgeschaltet.`);
+    // Ausfallregel: wessen Vernichtungsziel von jemand anderem erledigt wurde, bekommt Weltmacht
+    if (s.missions) {
+      for (const other of s.players) {
+        if (other.mission?.target === prevOwner && other.id !== pid) {
+          other.mission = { id: 'g_weltmacht' };
+          addLog(s, 'Deine Vernichtungs-Mission ist hinfällig – neues Ziel: Weltmacht.', [other.id]);
+        }
+      }
+    }
   }
 
   const max = from.troops - 1;
@@ -496,9 +688,16 @@ export function applyAction(prev, action, actorId, rng = Math.random) {
     forceSkip(s, rng);
     return { state: s };
   }
+  // Missionswahl ist unabhängig vom Zug (jeder wählt zu Beginn für sich)
+  if (action.type === 'chooseMission') {
+    const err = chooseMission(s, actorId, action.id);
+    return err ? { error: err } : { state: s };
+  }
   if (actorId !== currentPlayerId(s)) return { error: 'Du bist nicht am Zug.' };
   const handler = Object.hasOwn(HANDLERS, action.type) ? HANDLERS[action.type] : null;
   if (!handler) return { error: `Unbekannte Aktion: ${action.type}` };
   const error = handler(s, action, actorId, rng);
-  return error ? { error } : { state: s };
+  if (error) return { error };
+  checkMissionVictory(s, actorId); // Endziel nach jeder eigenen Aktion prüfen
+  return { state: s };
 }

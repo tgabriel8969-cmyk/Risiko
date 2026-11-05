@@ -8,6 +8,7 @@ import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
   ordenSets, ordenReward, ORDEN_TYPES, ORDEN_LABEL, ORDEN_DYNAMIC, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT,
+  missionProgress, missionName,
 } from './rules.js';
 
 export const esc = (s) =>
@@ -79,6 +80,7 @@ export class GameView {
         </div>
         <aside class="side">
           <section class="card panel" data-ref="panel"></section>
+          <section class="card mission" data-ref="mission"></section>
           <section class="card" data-ref="players"></section>
           <section class="card log" data-ref="log"></section>
           <section class="card orden-info" data-ref="ordenInfo"></section>
@@ -132,6 +134,7 @@ export class GameView {
       this.sel = { from: null, to: null };
       this.moveCount = null;
       this.phaseKey = key;
+      this.hotseatMissionFor = null; // Hot-Seat: Mission beim Zug-/Phasenwechsel wieder verdecken
     }
     this.validateSel();
     this.render();
@@ -576,6 +579,71 @@ export class GameView {
     this.renderLog();
     this.renderOrdenInfo();
     this.renderOrdenTray();
+    this.renderMission();
+  }
+
+  // Missionskarte: Name, 3 Stufen mit Haken und Fortschritt. Eigene Mission bzw.
+  // (Hot-Seat) die des Spielers am Zug – im Hot-Seat erst nach Klick, damit Mitspieler
+  // am selben Bildschirm nicht mitlesen.
+  renderMission() {
+    const el = this.$('mission');
+    const s = this.ctx.state;
+    if (!s.missions) { el.hidden = true; return; }
+    el.hidden = false;
+    const me = this.me();
+
+    if (s.phase === 'gameover') {
+      const w = playerById(s, s.winner);
+      const prog = missionProgress(s, s.winner);
+      el.innerHTML = `<h3>Mission</h3><p class="mission-name">🏆 ${esc(w.name)}: ${esc(prog?.name || '')}</p>`;
+      return;
+    }
+
+    // Missionswahl zu Spielbeginn: 2 Optionen zur Auswahl
+    const meP = playerById(s, me);
+    if (meP && !meP.mission && meP.missionOptions) {
+      const opt = (m) => {
+        const pr = missionProgress(s, me, m);
+        const stages = pr ? `<span class="muted small">${esc(pr.stage1.text)}<br>${esc(pr.goal.text)}</span>` : '';
+        return `<button class="mission-opt" data-pick="${m.id}">
+            <strong>${esc(missionName(m, s))}</strong>${stages}</button>`;
+      };
+      el.innerHTML = `<h3>Mission wählen</h3>
+        <p class="hint">Wähle eine von zwei geheimen Missionen:</p>
+        <div class="mission-choice">${meP.missionOptions.map(opt).join('')}</div>`;
+      el.querySelectorAll('[data-pick]').forEach((b) =>
+        b.addEventListener('click', () => this.dispatch({ type: 'chooseMission', id: b.dataset.pick })));
+      return;
+    }
+
+    // Hot-Seat: Mission verdeckt, bis der aktuelle Spieler sie einblendet
+    if (this.ctx.mode === 'local' && this.hotseatMissionFor !== me) {
+      el.innerHTML = `<h3>Mission</h3>
+        <p class="hint">Geheime Mission von <strong>${esc(playerById(s, me)?.name || '')}</strong>.</p>
+        <button class="secondary small" data-ref="revealMission">Mission anzeigen</button>`;
+      el.querySelector('[data-ref="revealMission"]').addEventListener('click', () => {
+        this.hotseatMissionFor = me;
+        this.renderMission();
+      });
+      return;
+    }
+
+    const prog = missionProgress(s, me);
+    if (!prog) { el.innerHTML = `<h3>Mission</h3><p class="muted small">Keine Mission.</p>`; return; }
+    const done = (playerById(s, me).stagesDone) || [false, false];
+    const row = (label, st, isDone) => `<li class="${isDone ? 'done' : ''}">
+        <span class="ms-check">${isDone ? '✓' : '○'}</span>
+        <span class="ms-text">${esc(st.text)}${st.detail ? ` <span class="muted">(${esc(st.detail)})</span>` : ''}</span></li>`;
+    el.innerHTML = `<h3>Mission</h3>
+      <p class="mission-name">${esc(prog.name)}</p>
+      <ul class="mission-stages">
+        ${row('E1', prog.stage1, done[0])}
+        ${row('E2', prog.stage2, done[1])}
+        ${row('Ziel', prog.goal, prog.goal.met)}
+      </ul>
+      ${this.ctx.mode === 'local' ? `<button class="ghost small" data-ref="hideMission">Verbergen</button>` : ''}`;
+    const hide = el.querySelector('[data-ref="hideMission"]');
+    if (hide) hide.addEventListener('click', () => { this.hotseatMissionFor = null; this.renderMission(); });
   }
 
   ordenIcon(type, size = 24) {
@@ -885,9 +953,13 @@ export class GameView {
         const lp = lobby.find((l) => l.id === pid);
         const offline = this.ctx.mode !== 'local' && lp && !lp.connected;
         const you = this.ctx.mode !== 'local' && pid === this.ctx.myId;
+        const stages = p.stagesDone || [false, false];
+        const missionDots = s.missions && p.alive
+          ? ` <span class="mission-dots" title="Missionsfortschritt (Etappe 1, Etappe 2, Endziel)">${stages[0] ? '●' : '○'}${stages[1] ? '●' : '○'}${p.id === s.winner ? '●' : '○'}</span>`
+          : '';
         return `<li class="${pid === cur && s.phase !== 'gameover' ? 'current' : ''} ${p.alive ? '' : 'dead'}">
           <span class="dot" style="background:${p.color}"></span>
-          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}</span>
+          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${missionDots}</span>
           <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
         </li>`;
       })
