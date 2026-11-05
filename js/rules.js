@@ -20,6 +20,55 @@ export const START_ARMIES = { 2: 30, 3: 26, 4: 22, 5: 19, 6: 17, 7: 15 };
 // In der Aufstellung setzt jeder reihum bis zu so viele Truppen pro Durchgang
 export const SETUP_BATCH = 3;
 
+// Orden: Belohnung fürs Erobern (statt Spielkarten). 3 Typen; ein Satz = 3 gleiche
+// oder 3 verschiedene. Bei >= ORDEN_FORCE_AT Orden muss zu Zugbeginn eingelöst werden.
+export const ORDEN_TYPES = ['kreuz', 'krone', 'medaille'];
+export const ORDEN_LABEL = { kreuz: 'Eisernes Kreuz', krone: 'Kaiserorden', medaille: 'Verdienstmedaille' };
+export const ORDEN_STATIC_BONUS = 5;
+export const ORDEN_DYNAMIC = [4, 6, 8, 10, 12, 15]; // danach +5 je weiterem eingelösten Satz
+export const ORDEN_FORCE_AT = 5;
+
+/** Einheiten-Bonus für den nächsten eingelösten Satz (abhängig vom Modus). */
+export function ordenReward(state) {
+  if (state.ordenMode !== 'dynamic') return ORDEN_STATIC_BONUS;
+  const n = state.setsRedeemed || 0;
+  return n < ORDEN_DYNAMIC.length ? ORDEN_DYNAMIC[n] : ORDEN_DYNAMIC[ORDEN_DYNAMIC.length - 1] + (n - ORDEN_DYNAMIC.length + 1) * 5;
+}
+
+/** Alle einlösbaren Sätze einer Hand (3 gleiche oder 3 verschiedene). */
+export function ordenSets(orden = []) {
+  const count = {};
+  for (const t of orden) count[t] = (count[t] || 0) + 1;
+  const sets = [];
+  for (const t of ORDEN_TYPES) if ((count[t] || 0) >= 3) sets.push([t, t, t]);
+  if (ORDEN_TYPES.every((t) => (count[t] || 0) >= 1)) sets.push([...ORDEN_TYPES]);
+  return sets;
+}
+
+/**
+ * Gefilterte Sicht des Zustands für einen bestimmten Spieler (rein, mutiert nicht).
+ * Entfernt bzw. reduziert Geheiminformationen fremder Spieler (§7 der Missions-Spec),
+ * sodass sie auch in den Browser-DevTools nicht lesbar sind. Für Felder, die erst in
+ * späteren Schritten entstehen (mission, depeschen, stats, …), wird hier schon gefiltert.
+ */
+export function viewFor(state, playerId) {
+  if (!state) return state;
+  const v = structuredClone(state);
+  // Private Log-Einträge nur für die berechtigten Spieler behalten
+  v.log = (v.log || []).filter((e) => !e.visibleTo || e.visibleTo.includes(playerId));
+  for (const p of v.players || []) {
+    if (p.id === playerId) continue; // eigene Infos bleiben vollständig
+    delete p.mission; // sichtbar bleiben nur p.stagesDone und p.pillory (öffentlich)
+    delete p.stats;
+    delete p.depeschenChoice;
+    if (Array.isArray(p.depeschen)) {
+      p.depeschenCount = p.depeschen.length;
+      delete p.depeschen;
+    }
+  }
+  return v;
+}
+
 const LOG_LIMIT = 150;
 const BLITZ_MAX_ROUNDS = 500;
 
@@ -98,8 +147,10 @@ const toInt = (v) =>
     ? Number(v)
     : NaN;
 
-function addLog(s, text) {
-  s.log.push({ turn: s.turn, text });
+function addLog(s, text, visibleTo) {
+  const entry = { turn: s.turn, text };
+  if (visibleTo) entry.visibleTo = visibleTo; // private Meldung nur für diese Spieler-IDs
+  s.log.push(entry);
   if (s.log.length > LOG_LIMIT) s.log.splice(0, s.log.length - LOG_LIMIT);
 }
 
@@ -113,8 +164,9 @@ function moveTroops(from, to, n) {
 /**
  * @param {{id:string, name:string}[]} players
  * @param {() => number} rng Zufallsfunktion [0,1) – in Tests deterministisch
+ * @param {{ordenMode?: 'static'|'dynamic'}} options
  */
-export function createGame(players, rng = Math.random) {
+export function createGame(players, rng = Math.random, options = {}) {
   if (players.length < MIN_PLAYERS || players.length > MAX_PLAYERS) {
     throw new Error(`Es werden ${MIN_PLAYERS} bis ${MAX_PLAYERS} Spieler benötigt.`);
   }
@@ -125,7 +177,7 @@ export function createGame(players, rng = Math.random) {
   });
 
   const state = {
-    players: players.map((p, i) => ({ id: p.id, name: p.name, color: PLAYER_COLORS[i], alive: true })),
+    players: players.map((p, i) => ({ id: p.id, name: p.name, color: PLAYER_COLORS[i], alive: true, orden: [] })),
     order,
     territories,
     phase: 'setup', // setup | reinforce | attack | fortify | gameover
@@ -135,7 +187,9 @@ export function createGame(players, rng = Math.random) {
     setupPlacedThisTurn: 0,
     reinforcements: 0,
     pendingMove: null, // nach Eroberung: { from, to, min, max }
-    conqueredThisTurn: false, // vorbereitet für Karten (später)
+    conqueredThisTurn: false,
+    ordenMode: options.ordenMode === 'dynamic' ? 'dynamic' : 'static',
+    setsRedeemed: 0, // global, steuert die dynamische Staffelung
     lastCombat: null,
     winner: null,
     log: [],
@@ -179,7 +233,14 @@ function startTurn(s) {
   addLog(s, `Zug ${s.turn}: ${playerName(s, pid)} ist am Zug und erhält ${r.total} Truppen${bonusText}.`);
 }
 
-function finishTurn(s) {
+function finishTurn(s, rng = Math.random) {
+  // Wer in diesem Zug mindestens ein Gebiet erobert hat, bekommt einen Orden
+  const ender = playerById(s, currentPlayerId(s));
+  if (s.conqueredThisTurn && ender.alive) {
+    const type = ORDEN_TYPES[Math.floor(rng() * ORDEN_TYPES.length)];
+    (ender.orden ||= []).push(type);
+    addLog(s, `${ender.name} erhält einen Orden (${ORDEN_LABEL[type]}) für seine Eroberung.`);
+  }
   s.pendingMove = null;
   const n = s.order.length;
   for (let step = 1; step <= n; step++) {
@@ -193,7 +254,7 @@ function finishTurn(s) {
   startTurn(s);
 }
 
-function forceSkip(s) {
+function forceSkip(s, rng = Math.random) {
   const pid = currentPlayerId(s);
   addLog(s, `${playerName(s, pid)} wurde vom Host übersprungen.`);
   if (s.phase === 'setup') {
@@ -204,7 +265,7 @@ function forceSkip(s) {
     const pm = s.pendingMove;
     moveTroops(s.territories[pm.from], s.territories[pm.to], pm.min);
   }
-  finishTurn(s);
+  finishTurn(s, rng);
 }
 
 // ---------------------------------------------------------------- Kampf
@@ -296,7 +357,29 @@ const HANDLERS = {
     t.troops += count;
     s.reinforcements -= count;
     addLog(s, `${playerName(s, pid)} setzt ${count} Truppe(n) nach ${territoryName(a.territory)}.`);
-    if (s.reinforcements === 0) s.phase = 'attack';
+    // Ab ORDEN_FORCE_AT Orden muss erst eingelöst werden, bevor es in die Angriffsphase geht
+    if (s.reinforcements === 0 && (playerById(s, pid).orden?.length || 0) < ORDEN_FORCE_AT) s.phase = 'attack';
+    return null;
+  },
+
+  redeemOrden(s, a, pid) {
+    if (s.phase !== 'reinforce') return 'Orden kannst du nur beim Verstärken einlösen.';
+    const set = Array.isArray(a.set) ? a.set : null;
+    if (!set || set.length !== 3 || !set.every((t) => ORDEN_TYPES.includes(t))) return 'Wähle genau 3 gültige Orden.';
+    const uniq = new Set(set);
+    if (uniq.size !== 1 && uniq.size !== 3) return 'Nur 3 gleiche oder 3 verschiedene Orden sind gültig.';
+    const player = playerById(s, pid);
+    const rest = [...(player.orden || [])];
+    for (const t of set) {
+      const i = rest.indexOf(t);
+      if (i < 0) return 'Du besitzt diese Orden nicht.';
+      rest.splice(i, 1);
+    }
+    const reward = ordenReward(s);
+    player.orden = rest;
+    s.setsRedeemed += 1;
+    s.reinforcements += reward;
+    addLog(s, `${playerName(s, pid)} löst einen Orden-Satz ein und erhält +${reward} Einheiten.`);
     return null;
   },
 
@@ -372,7 +455,7 @@ const HANDLERS = {
     return null;
   },
 
-  fortify(s, a, pid) {
+  fortify(s, a, pid, rng) {
     if (s.phase !== 'fortify') return 'Verschieben ist gerade nicht möglich.';
     const from = s.territories[a.from];
     const to = s.territories[a.to];
@@ -384,17 +467,17 @@ const HANDLERS = {
     if (!(count >= 1 && count <= from.troops - 1)) return `Du kannst 1 bis ${from.troops - 1} Truppe(n) verschieben.`;
     moveTroops(from, to, count);
     addLog(s, `${playerName(s, pid)} verschiebt ${count} Truppe(n) von ${territoryName(a.from)} nach ${territoryName(a.to)}.`);
-    finishTurn(s);
+    finishTurn(s, rng);
     return null;
   },
 
-  endTurn(s) {
+  endTurn(s, a, pid, rng) {
     if (s.phase === 'attack') {
       if (s.pendingMove) return 'Lege zuerst fest, wie viele Truppen nachrücken.';
     } else if (s.phase !== 'fortify') {
       return 'Du kannst deinen Zug jetzt noch nicht beenden.';
     }
-    finishTurn(s);
+    finishTurn(s, rng);
     return null;
   },
 };
@@ -410,7 +493,7 @@ export function applyAction(prev, action, actorId, rng = Math.random) {
   const s = structuredClone(prev);
 
   if (action.type === 'forceSkip') {
-    forceSkip(s);
+    forceSkip(s, rng);
     return { state: s };
   }
   if (actorId !== currentPlayerId(s)) return { error: 'Du bist nicht am Zug.' };

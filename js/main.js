@@ -1,6 +1,6 @@
 // Steuerung: Startbildschirm, Lobby, Rollen (Host / Client / Lokal) und Speicherstand.
 
-import { createGame, applyAction, currentPlayerId, MAX_PLAYERS, MIN_PLAYERS } from './rules.js';
+import { createGame, applyAction, currentPlayerId, viewFor, MAX_PLAYERS, MIN_PLAYERS } from './rules.js';
 import { HostNet, ClientNet, makeCode, formatCode, normalizeCode } from './net.js';
 import { GameView, esc } from './ui.js';
 
@@ -47,6 +47,7 @@ const app = {
   view: null,
   status: '',
   ping: null,
+  ordenMode: 'static', // Orden-Belohnung: 'static' | 'dynamic' (vor Spielstart wählbar)
 };
 
 // ================================================================== Start
@@ -88,6 +89,10 @@ function showStart(error = '') {
         <h2>Lokal testen</h2>
         <p class="muted">Hot-Seat an einem Gerät, ganz ohne Netzwerk – ideal zum Ausprobieren.</p>
         <div class="row"><select id="localCount">${options}</select>
+        <select id="localOrden" title="Orden-Belohnung">
+          <option value="static">Orden: statisch</option>
+          <option value="dynamic">Orden: dynamisch</option>
+        </select>
         <button class="secondary" data-act="local">Starten</button></div>
       </section>
       <p class="error">${esc(error)}</p>
@@ -115,7 +120,7 @@ function showStart(error = '') {
         if (code.length !== 6) return showStart('Bitte einen gültigen Raum-Code eingeben (4 Buchstaben + 2 Ziffern).');
         startClient(code, readName());
       }
-      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value));
+      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value), main.querySelector('#localOrden').value);
     } catch (err) {
       showStart(err.message);
     }
@@ -265,7 +270,12 @@ function hostApply(action, actorId, conn) {
 
 function hostChanged() {
   saveHost();
-  app.net?.broadcast({ t: 'sync', lobby: publicLobby(), state: app.state });
+  // Jeder Client bekommt seine eigene gefilterte Sicht (fremde Geheimnisse ausgeblendet).
+  // In der Lobby ist state noch null – dann wird wie bisher null gesendet.
+  const lobby = publicLobby();
+  for (const [pid, conn] of app.conns) {
+    app.net?.send(conn, { t: 'sync', lobby, state: app.state ? viewFor(app.state, pid) : null });
+  }
   render();
 }
 
@@ -273,7 +283,7 @@ function hostStartGame() {
   const players = app.lobby.filter((p) => p.connected);
   if (players.length < MIN_PLAYERS) return;
   app.lobby = players;
-  app.state = createGame(players.map(({ id, name }) => ({ id, name })));
+  app.state = createGame(players.map(({ id, name }) => ({ id, name })), Math.random, { ordenMode: app.ordenMode });
   hostChanged();
   showGame();
 }
@@ -323,9 +333,9 @@ function clientOnMessage(msg) {
 
 // ================================================================== Lokal (Hot-Seat)
 
-function startLocal(count) {
+function startLocal(count, ordenMode = 'static') {
   const players = Array.from({ length: count }, (_, i) => ({ id: `p${i + 1}`, name: `Spieler ${i + 1}` }));
-  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players) });
+  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players, Math.random, { ordenMode }) });
   showGame();
 }
 
@@ -344,9 +354,18 @@ function dispatch(action) {
   }
 }
 
+// Anzeige-Zustand: Host/Hot-Seat filtern selbst über viewFor; der Client bekommt
+// bereits eine gefilterte Sicht vom Host.
+function displayState() {
+  if (!app.state) return null;
+  if (app.mode === 'client') return app.state;
+  const viewer = app.mode === 'host' ? app.myId : currentPlayerId(app.state);
+  return viewFor(app.state, viewer);
+}
+
 function viewCtx() {
   return {
-    state: app.state,
+    state: displayState(),
     myId: app.myId,
     mode: app.mode,
     lobby: app.mode === 'host' ? publicLobby() : app.lobby,
@@ -404,11 +423,22 @@ function renderLobby() {
         </ul>
       </section>
       ${isHost
-        ? `<button data-act="start" ${online < MIN_PLAYERS ? 'disabled' : ''}>Spiel starten</button>
+        ? `<section class="card">
+             <label class="field">Orden-Belohnung
+               <select id="ordenMode">
+                 <option value="static"${app.ordenMode === 'static' ? ' selected' : ''}>statisch (immer gleich)</option>
+                 <option value="dynamic"${app.ordenMode === 'dynamic' ? ' selected' : ''}>dynamisch (steigt je Einlösung)</option>
+               </select>
+             </label>
+           </section>
+           <button data-act="start" ${online < MIN_PLAYERS ? 'disabled' : ''}>Spiel starten</button>
            <p class="hint">Teile den Code mit deinen Freunden. Mindestens ${MIN_PLAYERS} Spieler.</p>`
         : `<p class="hint">${app.myId ? 'Du bist drin. Warte, bis der Host das Spiel startet …' : 'Verbinde mit dem Host …'}</p>`}
       <button class="ghost" data-act="leave">Verlassen</button>
     </main>`;
+
+  const ordenSel = root.querySelector('#ordenMode');
+  if (ordenSel) ordenSel.addEventListener('change', (e) => { app.ordenMode = e.target.value; });
 
   root.querySelector('main').addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-act]');

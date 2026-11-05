@@ -5,3 +5,8 @@ node_modules/
 # Große Quell-Karten – im Spiel wird der bereinigte assets/weltkarte.svg genutzt
 riskio_weltkarte_1000x540.svg
 riskio_42_klassische_gebiete_altkartografie.svg
+
+# Große Original-Orden-PNGs (im Spiel: assets/orden-*.png, verkleinert)
+Historisches Eisernes Kreuz mit Eichenlaub.png
+Kaiserlicher Orden mit Krone und Kreuz.png
+Prunkvolle königliche Verdienstmedaille.png

@@ -7,6 +7,7 @@ import { TERRITORY_SHAPES } from './shapes.js';
 import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
+  ordenSets, ordenReward, ORDEN_TYPES, ORDEN_LABEL, ORDEN_DYNAMIC, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT,
 } from './rules.js';
 
 export const esc = (s) =>
@@ -74,11 +75,13 @@ export class GameView {
         <div class="board">
           <svg data-ref="map" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${MAP_SIZE.width} ${MAP_SIZE.height}"
                role="img" aria-label="Weltkarte"></svg>
+          <div class="orden-tray" data-ref="ordenTray"></div>
         </div>
         <aside class="side">
           <section class="card panel" data-ref="panel"></section>
           <section class="card" data-ref="players"></section>
           <section class="card log" data-ref="log"></section>
+          <section class="card orden-info" data-ref="ordenInfo"></section>
         </aside>
         <div class="toast" data-ref="toast" role="status"></div>
       </div>`;
@@ -91,6 +94,10 @@ export class GameView {
     });
     if (DEBUG) this.setupDebug();
     this.$('panel').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-act]');
+      if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
+    });
+    this.$('ordenTray').addEventListener('click', (e) => {
       const b = e.target.closest('[data-act]');
       if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
     });
@@ -230,6 +237,9 @@ export class GameView {
       case 'amount':
         this.amount = data.value === 'all' ? 'all' : Number(data.value);
         this.renderPanel();
+        break;
+      case 'redeem':
+        this.dispatch({ type: 'redeemOrden', set: (data.set || '').split(',') });
         break;
       case 'attack':
         this.dispatch({ type: 'attack', from, to, dice: Number(data.dice) });
@@ -564,6 +574,52 @@ export class GameView {
     this.renderPanel();
     this.renderPlayers();
     this.renderLog();
+    this.renderOrdenInfo();
+    this.renderOrdenTray();
+  }
+
+  ordenIcon(type, size = 24) {
+    return `<img class="orden-ic" src="assets/orden-${type}.png" width="${size}" height="${size}" alt="${esc(ORDEN_LABEL[type])}" title="${esc(ORDEN_LABEL[type])}" draggable="false">`;
+  }
+
+  renderOrdenInfo() {
+    const s = this.ctx.state;
+    let h = `<h3>Orden-Belohnung</h3>`;
+    if (s.ordenMode === 'dynamic') {
+      h += `<p class="small">Modus: <strong>dynamisch</strong> · nächste Einlösung: <strong>${ordenReward(s)}</strong> Einheiten</p>
+            <p class="small muted">Staffelung: ${ORDEN_DYNAMIC.join(', ')}, dann +5 · bereits eingelöst: ${s.setsRedeemed}</p>`;
+    } else {
+      h += `<p class="small">Modus: <strong>statisch</strong> · pro Satz: <strong>${ORDEN_STATIC_BONUS}</strong> Einheiten</p>`;
+    }
+    h += `<p class="small muted">Ein Satz = 3 gleiche oder 3 verschiedene Orden. Pro Zug mit ≥1 Eroberung gibt es 1 Orden.</p>`;
+    this.$('ordenInfo').innerHTML = h;
+  }
+
+  // Persönliche Orden-Ablage unter der Karte (größere Medaillen, zentriert).
+  // Einlösen nur in der eigenen Verstärken-Phase.
+  renderOrdenTray() {
+    const s = this.ctx.state;
+    const me = this.me();
+    const hand = (me && playerById(s, me)?.orden) || [];
+    const counts = {};
+    for (const t of hand) counts[t] = (counts[t] || 0) + 1;
+    const medals = ORDEN_TYPES.filter((t) => counts[t])
+      .map((t) => `<span class="orden-chip big">${this.ordenIcon(t, 46)}${counts[t] > 1 ? `<b>×${counts[t]}</b>` : ''}</span>`).join('');
+
+    const canRedeem = this.myTurn() && s.phase === 'reinforce';
+    const sets = canRedeem ? ordenSets(hand) : [];
+    const reward = ordenReward(s);
+    const setLabel = (set) => (new Set(set).size === 1
+      ? `3× ${ORDEN_LABEL[set[0]]}`
+      : ORDEN_TYPES.map((t) => ORDEN_LABEL[t]).join(' + '));
+    const btns = sets.map((set) => `<button class="seg-btn" data-act="redeem" data-set="${set.join(',')}">Einlösen: ${esc(setLabel(set))} · +${reward}</button>`).join('');
+    const forced = canRedeem && hand.length >= ORDEN_FORCE_AT;
+
+    let h = `<div class="orden-tray-label">Deine Orden${hand.length ? ` · ${hand.length}` : ''}</div>`;
+    h += `<div class="orden-tray-hand">${hand.length ? medals : '<span class="muted small">noch keine – erobere ein Gebiet für einen Orden</span>'}</div>`;
+    if (btns) h += `<div class="orden-tray-actions">${btns}</div>`;
+    if (forced) h += `<div class="orden-tray-forced">Du hast ${hand.length} Orden – bitte einen Satz einlösen, bevor du angreifst.</div>`;
+    this.$('ordenTray').innerHTML = h;
   }
 
   renderMeta() {
@@ -748,7 +804,7 @@ export class GameView {
       return `<p>Verstärkung: <strong>${s.reinforcements}</strong> Truppe(n) übrig.</p>
               <p class="small muted">Diesen Zug: ${parts.join(' · ')}</p>
               <p class="label">Pro Klick setzen:</p>${this.amountButtons([1, 3, 5, 'all'])}
-              <p class="hint">Klicke auf eigene Gebiete.</p>`;
+              <p class="hint">Klicke auf eigene Gebiete${ordenSets(playerById(s, me).orden || []).length ? ' – oder löse unter der Karte einen Orden-Satz ein' : ''}.</p>`;
     }
 
     if (s.phase === 'attack') {
@@ -831,7 +887,7 @@ export class GameView {
         const you = this.ctx.mode !== 'local' && pid === this.ctx.myId;
         return `<li class="${pid === cur && s.phase !== 'gameover' ? 'current' : ''} ${p.alive ? '' : 'dead'}">
           <span class="dot" style="background:${p.color}"></span>
-          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}</span>
+          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}</span>
           <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
         </li>`;
       })

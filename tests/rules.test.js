@@ -5,6 +5,7 @@ import { TERRITORIES, ADJACENCY, EDGES, CONTINENTS, TERRITORY_BY_ID } from '../j
 import {
   createGame, applyAction, currentPlayerId, countTerritories, calcReinforcements,
   validAttackTargets, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
+  ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
 } from '../js/rules.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
@@ -167,6 +168,101 @@ test('forceSkip überspringt den aktuellen Spieler', () => {
   assert.notEqual(currentPlayerId(r.state), pid);
 });
 
+// ------------------------------------------------------------------ Orden
+
+test('Orden: Eroberung bringt beim Zugende einen Orden, sonst nicht', () => {
+  let s = finishSetup(createGame(players(2), seeded(11)));
+  const pid = currentPlayerId(s);
+  s.phase = 'fortify';
+  s.conqueredThisTurn = true;
+  const r = act(s, { type: 'endTurn' });
+  assert.equal(r.players.find((p) => p.id === pid).orden.length, 1);
+
+  let s2 = finishSetup(createGame(players(2), seeded(12)));
+  const pid2 = currentPlayerId(s2);
+  s2.phase = 'fortify';
+  s2.conqueredThisTurn = false;
+  const r2 = act(s2, { type: 'endTurn' });
+  assert.equal(r2.players.find((p) => p.id === pid2).orden.length, 0);
+});
+
+test('Orden: Satz einlösen – statisch +5, dynamisch gestaffelt, ungültige abgelehnt', () => {
+  let s = finishSetup(createGame(players(3), seeded(13), { ordenMode: 'static' }));
+  const pid = currentPlayerId(s);
+  s.players.find((p) => p.id === pid).orden = ['kreuz', 'kreuz', 'kreuz'];
+  const before = s.reinforcements;
+  const r = act(s, { type: 'redeemOrden', set: ['kreuz', 'kreuz', 'kreuz'] });
+  assert.equal(r.reinforcements, before + ORDEN_STATIC_BONUS);
+  assert.equal(r.players.find((p) => p.id === pid).orden.length, 0);
+  assert.equal(r.setsRedeemed, 1);
+
+  let s2 = finishSetup(createGame(players(3), seeded(14), { ordenMode: 'static' }));
+  const pid2 = currentPlayerId(s2);
+  s2.players.find((p) => p.id === pid2).orden = ['kreuz', 'kreuz', 'krone'];
+  assert.ok(applyAction(s2, { type: 'redeemOrden', set: ['kreuz', 'kreuz', 'krone'] }, pid2).error, 'ungültiger Satz');
+  assert.ok(applyAction(s2, { type: 'redeemOrden', set: ['medaille', 'medaille', 'medaille'] }, pid2).error, 'nicht besessen');
+
+  let s3 = finishSetup(createGame(players(3), seeded(15), { ordenMode: 'dynamic' }));
+  const pid3 = currentPlayerId(s3);
+  s3.players.find((p) => p.id === pid3).orden = ['kreuz', 'krone', 'medaille'];
+  const exp = ordenReward(s3);
+  const r3 = act(s3, { type: 'redeemOrden', set: ['kreuz', 'krone', 'medaille'] });
+  assert.equal(r3.reinforcements, s3.reinforcements + exp);
+});
+
+test(`Orden: ab ${ORDEN_FORCE_AT} Orden erzwingt Einlösen vor der Angriffsphase`, () => {
+  let s = finishSetup(createGame(players(3), seeded(16), { ordenMode: 'static' }));
+  const pid = currentPlayerId(s);
+  s.players.find((x) => x.id === pid).orden = ['kreuz', 'kreuz', 'krone', 'krone', 'medaille'];
+  const own = Object.keys(s.territories).find((id) => s.territories[id].owner === pid);
+  const r = act(s, { type: 'place', territory: own, count: s.reinforcements });
+  assert.equal(r.reinforcements, 0);
+  assert.equal(r.phase, 'reinforce', 'Zwang: bleibt in Verstärken, bis eingelöst');
+  assert.ok(ordenSets(r.players.find((x) => x.id === pid).orden).length > 0);
+});
+
+// ------------------------------------------------------------------ Sichtbarkeit (viewFor)
+
+test('viewFor: fremde Geheimnisse (Mission, Depeschen, Wahl, stats, private Logs) sind entfernt', () => {
+  const s = createGame(players(3), seeded(21));
+  const [p0, p1] = s.players;
+  // künstlich Geheimfelder setzen (entstehen erst in späteren Schritten)
+  p0.mission = { id: 'g_weltmacht' };
+  p0.stats = { generalConquests: 2 };
+  p0.depeschen = ['a', 'b'];
+  p0.depeschenChoice = ['x', 'y'];
+  p1.mission = { id: 'k_na_af' };
+  p1.depeschen = ['c'];
+  s.log.push({ turn: s.turn, text: 'privat für p0', visibleTo: [p0.id] });
+  s.log.push({ turn: s.turn, text: 'öffentlich' });
+
+  const v0 = viewFor(s, p0.id);
+  // eigene Infos bleiben vollständig
+  assert.deepEqual(v0.players[0].mission, { id: 'g_weltmacht' });
+  assert.deepEqual(v0.players[0].depeschen, ['a', 'b']);
+  // fremder Spieler p1: Geheimnisse weg, nur Anzahl
+  assert.equal(v0.players[1].mission, undefined);
+  assert.equal(v0.players[1].depeschen, undefined);
+  assert.equal(v0.players[1].depeschenCount, 1);
+  // eigenes privates Log + öffentliches Log sichtbar
+  assert.ok(v0.log.some((e) => e.text === 'privat für p0'));
+  assert.ok(v0.log.some((e) => e.text === 'öffentlich'));
+
+  const v1 = viewFor(s, p1.id);
+  // p1 sieht p0s Geheimnisse nicht und das private Log nicht
+  assert.equal(v1.players[0].mission, undefined);
+  assert.equal(v1.players[0].stats, undefined);
+  assert.equal(v1.players[0].depeschenChoice, undefined);
+  assert.equal(v1.players[0].depeschenCount, 2);
+  assert.ok(!v1.log.some((e) => e.text === 'privat für p0'));
+  assert.ok(v1.log.some((e) => e.text === 'öffentlich'));
+
+  // reine Funktion: Original unverändert
+  assert.deepEqual(s.players[1].mission, { id: 'k_na_af' });
+  assert.equal(s.players[0].depeschen.length, 2);
+  assert.equal(s.log.filter((e) => e.text === 'privat für p0').length, 1);
+});
+
 // ------------------------------------------------------------------ Simulation
 
 function botAction(s, rng) {
@@ -177,6 +273,9 @@ function botAction(s, rng) {
     case 'setup':
       return { type: 'place', territory: pick(own), count: 1 };
     case 'reinforce': {
+      // Orden einlösen: Pflicht wenn keine Verstärkung mehr übrig (Zwang ab 5), sonst manchmal freiwillig
+      const sets = ordenSets(s.players.find((p) => p.id === pid).orden);
+      if (sets.length && (s.reinforcements === 0 || rng() < 0.3)) return { type: 'redeemOrden', set: sets[0] };
       const border = own.filter((id) => ADJACENCY[id].some((n) => s.territories[n].owner !== pid));
       return { type: 'place', territory: pick(border.length ? border : own), count: s.reinforcements };
     }
@@ -215,7 +314,7 @@ test('Simulation: 60 Zufallspartien mit 2–7 Bots verletzen keine Invarianten',
   let finished = 0;
   for (let g = 0; g < 60; g++) {
     const rng = seeded(1000 + g);
-    let s = createGame(players(2 + (g % 6)), rng);
+    let s = createGame(players(2 + (g % 6)), rng, { ordenMode: g % 2 ? 'dynamic' : 'static' });
     for (let i = 0; i < 30000 && s.phase !== 'gameover'; i++) {
       const action = botAction(s, rng);
       const r = applyAction(s, action, currentPlayerId(s), rng);
