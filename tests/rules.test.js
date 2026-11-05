@@ -6,7 +6,7 @@ import {
   createGame, applyAction, currentPlayerId, countTerritories, calcReinforcements,
   validAttackTargets, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
-  missionGoalMet, missionProgress, buildMissionPool,
+  missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
 } from '../js/rules.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
@@ -363,6 +363,108 @@ test('Vernichtung: Ausfallregel bei Fremd-Ausschaltung wechselt privat auf Weltm
   // privates Log ist für andere nicht sichtbar
   assert.ok(!viewFor(r.state, p1.id).log.some((e) => e.text.includes('Vernichtungs-Mission ist hinfällig')));
   assert.ok(viewFor(r.state, p0.id).log.some((e) => e.text.includes('Vernichtungs-Mission ist hinfällig')));
+});
+
+// ------------------------------------------------------------------ Missions-Etappen (Schritt 3)
+
+// Hilfen: Mission setzen + Zählfelder initialisieren
+function setMission(s, pid, mission) {
+  const p = s.players.find((x) => x.id === pid);
+  p.mission = mission;
+  p.missionOptions = null;
+  p.stagesDone = [false, false];
+  p.stageBonus = 0;
+  p.stats = { defendedSinceOwnTurn: 0 };
+  return p;
+}
+
+test('Etappe 1 wird nicht durch die Startverteilung ausgelöst', () => {
+  for (let g = 0; g < 50; g++) {
+    const s = createGame(players(3 + (g % 5)), seeded(900 + g), { missions: true });
+    for (const p of s.players) assert.deepEqual(p.stagesDone, [false, false]);
+  }
+});
+
+test('Etappe 1 (Weltmacht): 3 Eroberungen im Zug → Haken + 2 Truppen, Bonus fließt genau einmal', () => {
+  let s = createGame(players(3), seeded(130), { missions: true });
+  const pid = currentPlayerId(s);
+  setMission(s, pid, { id: 'g_weltmacht' });
+  const other = s.order.find((id) => id !== pid);
+  const hub = 'ontario';
+  const neigh = ADJACENCY[hub].slice(0, 3);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+  s.territories[hub] = { owner: pid, troops: 30 };
+  for (const t of neigh) s.territories[t] = { owner: other, troops: 1 };
+  s.phase = 'attack'; s.current = s.order.indexOf(pid);
+  s.pendingMove = null; s.conqueredThisTurn = false;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+
+  let st = s;
+  for (const t of neigh) {
+    let r = applyAction(st, { type: 'blitz', from: hub, to: t }, pid, diceSeq([6, 6, 6, 1]));
+    assert.ifError(r.error); st = r.state;
+    if (st.pendingMove) { r = applyAction(st, { type: 'occupy', count: st.pendingMove.min }, pid); assert.ifError(r.error); st = r.state; }
+  }
+  const p = st.players.find((x) => x.id === pid);
+  assert.equal(p.stagesDone[0], true, 'Etappe 1 erreicht');
+  assert.equal(p.stageBonus, MISSION_STAGE_BONUS);
+
+  // Zug beenden und reihum zurück zu pid – der Bonus muss genau einmal in die Verstärkung fließen
+  st = applyAction(st, { type: 'endAttack' }, pid).state;
+  st = applyAction(st, { type: 'endTurn' }, pid).state;
+  while (currentPlayerId(st) !== pid) st = applyAction(st, { type: 'forceSkip' }, 'host').state;
+  const pp = st.players.find((x) => x.id === pid);
+  assert.equal(pp.stageBonus, 0, 'Bonus verbraucht');
+  assert.equal(st.reinforcements, calcReinforcements(st, pid).total + MISSION_STAGE_BONUS, 'die +2 steckten in dieser Verstärkung');
+});
+
+test('Etappe 2 (Weltmacht, Zustand): am Zugende erreicht → Haken + 2 Truppen', () => {
+  let s = createGame(players(4), seeded(132), { missions: true });
+  const pid = currentPlayerId(s);
+  setMission(s, pid, { id: 'g_weltmacht' });
+  const other = s.order.find((id) => id !== pid);
+  const terr = Object.keys(s.territories);
+  terr.forEach((t, i) => { s.territories[t] = { owner: i < 18 ? pid : other, troops: 1 }; }); // 18 = Stufe 2 bei 4 Spielern
+  s.phase = 'fortify'; s.current = s.order.indexOf(pid);
+  s.pendingMove = null; s.conqueredThisTurn = false;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  const r = applyAction(s, { type: 'endTurn' }, pid);
+  assert.ifError(r.error);
+  const p = r.state.players.find((x) => x.id === pid);
+  assert.equal(p.stagesDone[1], true);
+  assert.equal(p.stageBonus, MISSION_STAGE_BONUS);
+  assert.notEqual(r.state.phase, 'gameover', 'Stufe 2 ist noch kein Sieg');
+});
+
+test('Bollwerk: Abwehr zählt pro Aktion; Etappe 1 greift zu Zugbeginn', () => {
+  let s = createGame(players(3), seeded(140), { missions: true });
+  const def = s.order[0];
+  const att = s.order[1];
+  setMission(s, def, { id: 'g_bollwerk' });
+  const x = 'ontario', y = ADJACENCY['ontario'][0];
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: att, troops: 1 };
+  s.territories[x] = { owner: def, troops: 10 };
+  s.territories[y] = { owner: att, troops: 8 };
+  s.phase = 'attack'; s.current = s.order.indexOf(att);
+  s.pendingMove = null; s.conqueredThisTurn = false;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+
+  // Verteidiger gewinnt – Gebiet bleibt bei def → genau eine Abwehr
+  let r = applyAction(s, { type: 'attack', from: y, to: x, dice: 1 }, att, diceSeq([1, 6, 6]));
+  assert.ifError(r.error); let st = r.state;
+  assert.equal(st.players.find((p) => p.id === def).stats.defendedSinceOwnTurn, 1);
+  // Blitz, der nicht erobert, zählt ebenfalls nur +1 (pro Aktion)
+  r = applyAction(st, { type: 'blitz', from: y, to: x }, att, diceSeq([1, 6, 6]));
+  assert.ifError(r.error); st = r.state;
+  assert.equal(st.players.find((p) => p.id === def).stats.defendedSinceOwnTurn, 2);
+
+  // att beendet den Zug, reihum bis def wieder dran ist → Etappe 1 (2 Abwehren) zu Zugbeginn
+  st = applyAction(st, { type: 'endAttack' }, att).state;
+  st = applyAction(st, { type: 'endTurn' }, att).state;
+  while (currentPlayerId(st) !== def) st = applyAction(st, { type: 'forceSkip' }, 'host').state;
+  const dp = st.players.find((p) => p.id === def);
+  assert.equal(dp.stagesDone[0], true, 'Bollwerk-Etappe 1 bei Zugbeginn erreicht');
+  assert.equal(dp.stats.defendedSinceOwnTurn, 0, 'Abwehrzähler ab eigenem Zugbeginn zurückgesetzt');
 });
 
 // ------------------------------------------------------------------ Simulation

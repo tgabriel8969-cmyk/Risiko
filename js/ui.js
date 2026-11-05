@@ -687,6 +687,10 @@ export class GameView {
     h += `<div class="orden-tray-hand">${hand.length ? medals : '<span class="muted small">noch keine – erobere ein Gebiet für einen Orden</span>'}</div>`;
     if (btns) h += `<div class="orden-tray-actions">${btns}</div>`;
     if (forced) h += `<div class="orden-tray-forced">Du hast ${hand.length} Orden – bitte einen Satz einlösen, bevor du angreifst.</div>`;
+    // Missions-Etappe erreicht: Belohnung für die nächste Runde vor Augen halten
+    const pendingStage = (me && playerById(s, me)?.stageBonus) || 0;
+    if (pendingStage) h += `<div class="orden-tray-reward">🎯 Etappe erreicht: +${pendingStage} Einheiten für die nächste Runde</div>`;
+    // Depeschen folgen in Schritt 4 und werden hier unter den Orden angezeigt
     this.$('ordenTray').innerHTML = h;
   }
 
@@ -869,6 +873,7 @@ export class GameView {
     if (s.phase === 'reinforce') {
       const r = calcReinforcements(s, me);
       const parts = [`${r.base} für ${r.territories} Gebiete`, ...r.bonuses.map((b) => `${esc(b.name)} +${b.bonus}`)];
+      if (s.turnStageBonus) parts.push(`Missions-Etappe +${s.turnStageBonus}`);
       return `<p>Verstärkung: <strong>${s.reinforcements}</strong> Truppe(n) übrig.</p>
               <p class="small muted">Diesen Zug: ${parts.join(' · ')}</p>
               <p class="label">Pro Klick setzen:</p>${this.amountButtons([1, 3, 5, 'all'])}

@@ -216,6 +216,7 @@ input, select {
 .orden-tray-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: .5rem; }
 .orden-tray-actions .seg-btn { flex: none; }
 .orden-tray-forced { color: var(--danger); font-weight: 600; font-size: .82rem; margin-top: .4rem; }
+.orden-tray-reward { color: var(--ok); font-weight: 600; font-size: .82rem; margin-top: .4rem; }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px);

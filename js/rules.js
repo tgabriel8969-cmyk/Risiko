@@ -224,6 +224,65 @@ export function missionProgress(s, pid, mission = playerById(s, pid)?.mission) {
   return { id, name: missionName(m, s), stage1, stage2, goal };
 }
 
+// Ist die Zustands-Etappe (Etappe 2) der Mission aktuell erfüllt? (rein)
+function stage2Met(s, pid) {
+  const m = playerById(s, pid)?.mission;
+  if (!m) return false;
+  const id = m.id;
+  const n = s.order.length;
+  const T = MISSION_TARGETS;
+  if (id in KONTINENT_MISSIONS) return KONTINENT_MISSIONS[id].some((c) => continentComplete(s, pid, c));
+  if (id === 'g_weltmacht') return countTerritories(s, pid) >= scaled(T.g_weltmacht.stage2, n);
+  if (id === 'g_bollwerk') return countTerritoriesWithTroops(s, pid, T.g_bollwerk.minTroops) >= scaled(T.g_bollwerk.stage2, n);
+  if (m.target) return (playerById(s, m.target)?.alive) && countTerritories(s, m.target) <= T.vernichtung.stage2MaxTerritories;
+  if (id === 'f_feldherr') return completedContinents(s, pid).length >= T.feldherr.stage2Continents;
+  return false;
+}
+
+// Eine Etappe als erreicht markieren und +2 Truppen gutschreiben (einmalig).
+function reachStage(s, pid, idx) {
+  const p = playerById(s, pid);
+  if (!p?.mission || p.stagesDone[idx]) return;
+  p.stagesDone[idx] = true;
+  p.stageBonus += MISSION_STAGE_BONUS;
+  addLog(s, `${p.name} hat eine Etappe erreicht (+${MISSION_STAGE_BONUS} Truppen).`); // welche bleibt geheim
+}
+
+// Etappe 1 = Ereignis, nach jeder Eroberung geprüft (nutzt turnStats des Spielers am Zug).
+function checkStage1(s, pid) {
+  if (!s.missions) return;
+  const p = playerById(s, pid);
+  const m = p?.mission;
+  if (!m || p.stagesDone[0]) return;
+  const id = m.id;
+  const ts = s.turnStats || { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  let ok = false;
+  if (id in KONTINENT_MISSIONS) {
+    const inZiel = KONTINENT_MISSIONS[id].reduce((sum, c) => sum + (ts.conqueredIn[c] || 0), 0);
+    ok = inZiel >= MISSION_TARGETS.kontinent.stage1Conquests;
+  } else if (id === 'g_weltmacht') {
+    ok = ts.conquered >= MISSION_TARGETS.g_weltmacht.stage1Conquests;
+  } else if (m.target) {
+    ok = (ts.conqueredFrom[m.target] || 0) >= MISSION_TARGETS.vernichtung.stage1From;
+  }
+  // g_bollwerk (Abwehr) und f_feldherr (General) sind keine Eroberungs-Ereignisse → hier nichts
+  if (ok) reachStage(s, pid, 0);
+}
+
+// Etappe 2 = Zustand, am Ende des eigenen Zugs geprüft (für alle Missionen).
+function checkStage2(s, pid) {
+  if (!s.missions) return;
+  if (stage2Met(s, pid)) reachStage(s, pid, 1);
+}
+
+// Abwehr zählen (§5.2): Gebiet nach der Angriffsaktion noch beim Verteidiger -> +1.
+function countDefense(s, toId, defenderId) {
+  if (!s.missions) return;
+  if (s.territories[toId].owner !== defenderId) return; // erobert -> keine Abwehr
+  const d = playerById(s, defenderId);
+  if (d?.stats) d.stats.defendedSinceOwnTurn = (d.stats.defendedSinceOwnTurn || 0) + 1;
+}
+
 function checkMissionVictory(s, pid) {
   if (!s.missions || s.phase === 'gameover') return;
   if (missionGoalMet(s, pid)) {
@@ -271,7 +330,9 @@ export function calcReinforcements(s, pid) {
       bonuses.push({ continent: cid, name: CONTINENTS[cid].name, bonus: CONTINENTS[cid].bonus });
     }
   }
-  return { territories, base, bonuses, total: base + bonuses.reduce((sum, b) => sum + b.bonus, 0) };
+  const stageBonus = playerById(s, pid)?.stageBonus || 0; // aus erreichten Missions-Etappen
+  const total = base + bonuses.reduce((sum, b) => sum + b.bonus, 0) + stageBonus;
+  return { territories, base, bonuses, stageBonus, total };
 }
 
 /** Feindliche Nachbarn, die von `from` aus angegriffen werden können. */
@@ -374,7 +435,9 @@ export function createGame(players, rng = Math.random, options = {}) {
     for (const p of state.players) {
       p.missionOptions = choices[p.id]; // 2 zur Auswahl, bis gewählt wird
       p.mission = null;
-      p.stagesDone = [false, false]; // Etappen-Tracking folgt in Schritt 3
+      p.stagesDone = [false, false]; // [Etappe 1, Etappe 2]
+      p.stageBonus = 0; // +2 je erreichter Etappe, fließt in die nächste Verstärkung
+      p.stats = { defendedSinceOwnTurn: 0 }; // Bollwerk-Zähler (dauerhaft)
     }
   }
 
@@ -404,6 +467,16 @@ function advanceSetup(s) {
 
 function startTurn(s) {
   const pid = currentPlayerId(s);
+  // Zähler für diesen Zug zurücksetzen
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  if (s.missions) {
+    // Bollwerk-Etappe 1 (Abwehr) zu Zugbeginn prüfen, damit der Bonus sofort zählt
+    const p = playerById(s, pid);
+    if (p.mission?.id === 'g_bollwerk' && !p.stagesDone[0] && (p.stats?.defendedSinceOwnTurn || 0) >= MISSION_TARGETS.g_bollwerk.stage1Defends) {
+      reachStage(s, pid, 0);
+    }
+    if (p.stats) p.stats.defendedSinceOwnTurn = 0; // Zähler ab eigenem Zugbeginn neu
+  }
   const r = calcReinforcements(s, pid);
   s.phase = 'reinforce';
   s.reinforcements = r.total;
@@ -412,12 +485,19 @@ function startTurn(s) {
   const bonusText = r.bonuses.length
     ? ` (inkl. Bonus: ${r.bonuses.map((b) => `${b.name} +${b.bonus}`).join(', ')})`
     : '';
-  addLog(s, `Zug ${s.turn}: ${playerName(s, pid)} ist am Zug und erhält ${r.total} Truppen${bonusText}.`);
+  const stageText = r.stageBonus ? ` (+${r.stageBonus} Etappen-Bonus)` : '';
+  addLog(s, `Zug ${s.turn}: ${playerName(s, pid)} ist am Zug und erhält ${r.total} Truppen${bonusText}${stageText}.`);
+  // Etappen-Bonus ist nun verrechnet; den Betrag für die Anzeige dieses Zugs merken
+  s.turnStageBonus = r.stageBonus;
+  const p = playerById(s, pid);
+  if (p) p.stageBonus = 0;
 }
 
 function finishTurn(s, rng = Math.random) {
-  // Wer in diesem Zug mindestens ein Gebiet erobert hat, bekommt einen Orden
   const ender = playerById(s, currentPlayerId(s));
+  // Zustands-Etappe (Etappe 2) am Ende des eigenen Zugs prüfen (vor dem Spielerwechsel)
+  checkStage2(s, ender.id);
+  // Wer in diesem Zug mindestens ein Gebiet erobert hat, bekommt einen Orden
   if (s.conqueredThisTurn && ender.alive) {
     const type = ORDEN_TYPES[Math.floor(rng() * ORDEN_TYPES.length)];
     (ender.orden ||= []).push(type);
@@ -489,6 +569,13 @@ function conquer(s, fromId, toId, dice, pid) {
   to.owner = pid;
   to.troops = 0;
   s.conqueredThisTurn = true;
+  // Zug-Zähler für Missions-Etappe 1 (§5.1)
+  if (s.turnStats) {
+    s.turnStats.conquered += 1;
+    s.turnStats.conqueredFrom[prevOwner] = (s.turnStats.conqueredFrom[prevOwner] || 0) + 1;
+    const cont = TERRITORY_BY_ID[toId].continent;
+    s.turnStats.conqueredIn[cont] = (s.turnStats.conqueredIn[cont] || 0) + 1;
+  }
   if (s.lastCombat) s.lastCombat.conquered = true;
   addLog(s, `${playerName(s, pid)} erobert ${territoryName(toId)}!`);
 
@@ -522,6 +609,8 @@ function conquer(s, fromId, toId, dice, pid) {
 
   if (min === max) moveTroops(from, to, min);
   else s.pendingMove = { from: fromId, to: toId, min, max };
+
+  checkStage1(s, pid); // Ereignis-Etappe direkt nach der Eroberung prüfen
 }
 
 // ---------------------------------------------------------------- Aktionen
@@ -596,6 +685,7 @@ const HANDLERS = {
         `[${r.att.join(' ')}] gegen [${r.def.join(' ')}] – Verluste ${r.attLoss}:${r.defLoss}.`,
     );
     if (s.territories[a.to].troops === 0) conquer(s, a.from, a.to, dice, pid);
+    else countDefense(s, a.to, defender);
     return null;
   },
 
@@ -627,6 +717,7 @@ const HANDLERS = {
         `${territoryName(a.to)} (${playerName(s, defender)}): ${rounds} Runde(n), Verluste ${attLoss}:${defLoss}.`,
     );
     if (to.troops === 0) conquer(s, a.from, a.to, dice, pid);
+    else countDefense(s, a.to, defender);
     return null;
   },
 
