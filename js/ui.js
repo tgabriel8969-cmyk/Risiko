@@ -8,7 +8,7 @@ import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
   ordenSets, ordenReward, ORDEN_TYPES, ORDEN_LABEL, ORDEN_DYNAMIC, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT,
-  missionProgress, missionName,
+  missionProgress, missionName, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT,
 } from './rules.js';
 
 export const esc = (s) =>
@@ -48,6 +48,8 @@ export class GameView {
     this.amount = 1;
     this.moveCount = null;
     this.phaseKey = null;
+    this.depesche = null; // aktuell „scharfgeschaltete“ Depesche: { index, id, need, from, to }
+    this.discardSel = null; // bei voller Hand: Index der zum Ablegen gewählten Karte
     this.debugPos = {}; // id -> {x,y} Overrides beim Verschieben im Debug-Modus
     this.shapeOverride = {}; // id -> [[x,y],...] bearbeitete Landflächen
     this.debugMode = 'tokens'; // 'tokens' | 'borders' | 'sea'
@@ -81,6 +83,7 @@ export class GameView {
         <aside class="side">
           <section class="card panel" data-ref="panel"></section>
           <section class="card mission" data-ref="mission"></section>
+          <section class="card depeschen" data-ref="depeschen"></section>
           <section class="card" data-ref="players"></section>
           <section class="card log" data-ref="log"></section>
           <section class="card orden-info" data-ref="ordenInfo"></section>
@@ -100,6 +103,10 @@ export class GameView {
       if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
     });
     this.$('ordenTray').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-act]');
+      if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
+    });
+    this.$('depeschen').addEventListener('click', (e) => {
       const b = e.target.closest('[data-act]');
       if (b && !b.disabled) this.onAct(b.dataset.act, b.dataset);
     });
@@ -133,9 +140,11 @@ export class GameView {
     if (key !== this.phaseKey) {
       this.sel = { from: null, to: null };
       this.moveCount = null;
+      this.depesche = null; // scharfgeschaltete Depesche beim Zug-/Phasenwechsel vergessen
       this.phaseKey = key;
       this.hotseatMissionFor = null; // Hot-Seat: Mission beim Zug-/Phasenwechsel wieder verdecken
     }
+    this.discardSel = null; // Ablage-Auswahl gilt immer nur für den aktuellen Wahl-Dialog
     this.validateSel();
     this.render();
   }
@@ -168,6 +177,7 @@ export class GameView {
   clearSel() {
     this.sel = { from: null, to: null };
     this.moveCount = null;
+    this.depesche = null; // Esc bricht auch eine scharfgeschaltete Depesche ab
     if (this.ctx) this.render();
   }
 
@@ -191,6 +201,9 @@ export class GameView {
     const s = this.ctx.state;
     const me = this.me();
     const t = s.territories[id];
+
+    // Eine scharfgeschaltete Depesche fängt Kartenklicks ab, bevor die normale Phasenlogik greift.
+    if (this.depesche) return this.onDepescheTerritory(id);
 
     if (s.phase === 'setup' || s.phase === 'reinforce') {
       if (t.owner !== me) return this.showError('Du kannst nur auf eigene Gebiete setzen.');
@@ -233,6 +246,84 @@ export class GameView {
     }
   }
 
+  // ---------------------------------------------------------------- Depeschen (UI)
+
+  handCard(idx) {
+    return playerById(this.ctx.state, this.me())?.depeschen?.[idx] ?? null;
+  }
+
+  // Gültige Zielgebiete der aktuell scharfgeschalteten Depesche (für Markierung & Klickprüfung).
+  depescheTargets() {
+    const s = this.ctx.state;
+    const me = this.me();
+    const d = this.depesche;
+    if (!d) return new Set();
+    const ids = Object.keys(s.territories);
+    const mineT = (t) => s.territories[t].owner === me;
+    if (d.id === 'nachschub') return new Set(ids.filter(mineT));
+    if (d.id === 'sabotage') return new Set(ids.filter((t) => !mineT(t)));
+    if (d.need === 'from') return new Set(ids.filter((t) => mineT(t) && s.territories[t].troops >= 2));
+    if (d.need === 'to') {
+      if (d.id === 'gewaltmarsch') return reachableOwn(s, d.from);
+      return new Set(ids.filter((t) => mineT(t) && t !== d.from));
+    }
+    return new Set();
+  }
+
+  // Kartenklick bei scharfer Depesche: Ziel(e) einsammeln, bei Vollständigkeit ausspielen.
+  onDepescheTerritory(id) {
+    const s = this.ctx.state;
+    const me = this.me();
+    const t = s.territories[id];
+    const d = this.depesche;
+    if (d.id === 'nachschub') {
+      if (t.owner !== me) return this.showError('Wähle ein eigenes Gebiet.');
+      return this.playDepescheArmed({ target: id });
+    }
+    if (d.id === 'sabotage') {
+      if (t.owner === me) return this.showError('Sabotage trifft nur gegnerische Gebiete.');
+      return this.playDepescheArmed({ target: id });
+    }
+    // gewaltmarsch / luftbruecke: erst Start, dann Ziel, dann Anzahl per Regler
+    if (d.need === 'from') {
+      if (t.owner !== me) return this.showError('Wähle ein eigenes Startgebiet.');
+      if (t.troops < 2) return this.showError('Von hier kann nichts abgezogen werden (nur 1 Truppe).');
+      d.from = id; d.need = 'to';
+      return this.render();
+    }
+    if (id === d.from) { d.from = null; d.need = 'from'; return this.render(); }
+    if (t.owner !== me) return this.showError('Das Zielgebiet muss dir gehören.');
+    if (d.id === 'gewaltmarsch' && !reachableOwn(s, d.from).has(id)) {
+      return this.showError('Nur über eigene Gebiete verbunden möglich.');
+    }
+    d.to = id; d.need = 'count';
+    this.moveCount = clamp(this.moveCount ?? (s.territories[d.from].troops - 1), 1, s.territories[d.from].troops - 1);
+    this.render();
+  }
+
+  // Scharfgeschaltete Depesche tatsächlich spielen (danach Auswahl aufheben).
+  playDepescheArmed(extra) {
+    const d = this.depesche;
+    this.depesche = null;
+    this.moveCount = null;
+    this.dispatch({ type: 'playDepesche', index: d.index, ...extra });
+  }
+
+  // Belohnungs-Wahl auflösen. Bei voller Hand ist eine Ablage-Auswahl nötig.
+  chooseKeepDispatch(which) {
+    const s = this.ctx.state;
+    const p = playerById(s, this.me());
+    if (!p?.depeschenChoice?.length) return;
+    if (which === 'none') { this.discardSel = null; return this.dispatch({ type: 'chooseDepesche', keep: null }); }
+    const full = (p.depeschen?.length || 0) >= DEPESCHE_HAND_LIMIT;
+    if (full && this.discardSel == null) {
+      return this.showError('Deine Hand ist voll – wähle zuerst eine Karte zum Ablegen.');
+    }
+    const discard = full ? this.discardSel : undefined;
+    this.discardSel = null;
+    this.dispatch({ type: 'chooseDepesche', keep: which, discard });
+  }
+
   onAct(act, data) {
     const s = this.ctx.state;
     const { from, to } = this.sel;
@@ -243,6 +334,34 @@ export class GameView {
         break;
       case 'redeem':
         this.dispatch({ type: 'redeemOrden', set: (data.set || '').split(',') });
+        break;
+      case 'armDepesche': {
+        const idx = Number(data.index);
+        const id = this.handCard(idx);
+        if (!id) break;
+        if (id === 'ueberraschung') { this.dispatch({ type: 'playDepesche', index: idx }); break; }
+        const need = id === 'gewaltmarsch' || id === 'luftbruecke' ? 'from' : 'target';
+        this.depesche = { index: idx, id, need, from: null, to: null };
+        this.sel = { from: null, to: null }; // normale Auswahl ruhen lassen
+        this.render();
+        break;
+      }
+      case 'playDep':
+        if (this.depesche?.need === 'count') {
+          this.playDepescheArmed({ from: this.depesche.from, to: this.depesche.to, count: this.moveCount });
+        }
+        break;
+      case 'cancelDep':
+        this.depesche = null;
+        this.moveCount = null;
+        this.render();
+        break;
+      case 'keepDep':
+        this.chooseKeepDispatch(data.keep);
+        break;
+      case 'selDiscard':
+        this.discardSel = Number(data.idx);
+        this.renderDepeschen();
         break;
       case 'attack':
         this.dispatch({ type: 'attack', from, to, dice: Number(data.dice) });
@@ -580,6 +699,7 @@ export class GameView {
     this.renderOrdenInfo();
     this.renderOrdenTray();
     this.renderMission();
+    this.renderDepeschen();
   }
 
   // Missionskarte: Name, 3 Stufen mit Haken und Fortschritt. Eigene Mission bzw.
@@ -650,6 +770,73 @@ export class GameView {
     return `<img class="orden-ic" src="assets/orden-${type}.png" width="${size}" height="${size}" alt="${esc(ORDEN_LABEL[type])}" title="${esc(ORDEN_LABEL[type])}" draggable="false">`;
   }
 
+  // Depeschen-Karte: offener Wahl-Dialog (falls vorhanden) + eigene Hand.
+  renderDepeschen() {
+    const el = this.$('depeschen');
+    const s = this.ctx.state;
+    if (!s.missions) { el.innerHTML = ''; el.hidden = true; return; }
+    el.hidden = false;
+    const p = playerById(s, this.me());
+    let h = `<h3>Depeschen</h3>`;
+    const choice = p?.depeschenChoice?.[0];
+    if (choice) h += this.depescheChoiceHtml(p, choice);
+    h += this.depescheHandHtml(p?.depeschen || []);
+    el.innerHTML = h;
+  }
+
+  depLabel(level) { return level === 1 ? 'I' : 'II'; }
+
+  depescheChoiceHtml(p, choice) {
+    const full = (p.depeschen?.length || 0) >= DEPESCHE_HAND_LIMIT;
+    const cardBtn = (which, id) => {
+      if (!id) return '';
+      const c = DEPESCHE_CARDS[id];
+      return `<button class="dep-choice-card lvl${c.level}" data-act="keepDep" data-keep="${which}">
+        <span class="dep-lvl">${this.depLabel(c.level)}</span>
+        <strong>${esc(c.name)}</strong>
+        <span class="muted small">${esc(c.info)}</span></button>`;
+    };
+    let discardUi = '';
+    if (full) {
+      const chips = (p.depeschen || []).map((id, i) =>
+        `<button class="dep-discard${this.discardSel === i ? ' sel' : ''}" data-act="selDiscard" data-idx="${i}">${esc(DEPESCHE_CARDS[id].name)}</button>`).join('');
+      discardUi = `<p class="small">Hand voll – wähle eine Karte zum Ablegen:</p><div class="dep-discard-row">${chips}</div>`;
+    }
+    return `<div class="dep-choice">
+      <p class="label">🎁 Belohnung: wähle eine Depesche (Stufe ${this.depLabel(choice.level)})</p>
+      <div class="dep-choice-cards">${cardBtn('a', choice.cards[0])}${cardBtn('b', choice.cards[1])}</div>
+      ${discardUi}
+      <button class="ghost small" data-act="keepDep" data-keep="none">Beide verwerfen</button>
+    </div>`;
+  }
+
+  depescheHandHtml(hand) {
+    const s = this.ctx.state;
+    if (!hand.length) return `<p class="muted small">Keine Depeschen – erreiche eine Missions-Etappe für eine Karte.</p>`;
+    // Grund, warum eine Karte gerade nicht spielbar ist (sonst null = spielbar).
+    const reasonFor = (card) => {
+      if (!this.myTurn()) return 'Nur in deinem Zug spielbar.';
+      if (s.pendingMove) return 'Lege zuerst das Nachrücken fest.';
+      if (s.depeschePlayedThisTurn) return 'Pro Zug nur eine Depesche.';
+      if (!card.phases.includes(s.phase)) return `In der Phase „${PHASE_LABEL[s.phase]}“ nicht spielbar.`;
+      return null;
+    };
+    const armedIdx = this.depesche?.index;
+    const chips = hand.map((id, i) => {
+      const card = DEPESCHE_CARDS[id];
+      const reason = reasonFor(card);
+      const armed = armedIdx === i;
+      const cls = ['dep-chip', `lvl${card.level}`, reason ? 'disabled' : 'playable', armed ? 'armed' : ''].filter(Boolean).join(' ');
+      const title = esc(card.info + (reason ? ` — ${reason}` : ''));
+      const attr = reason ? 'disabled' : `data-act="armDepesche" data-index="${i}"`;
+      return `<button class="${cls}" ${attr} title="${title}">
+        <span class="dep-lvl">${this.depLabel(card.level)}</span>
+        <span class="dep-name">${esc(card.name)}</span></button>`;
+    }).join('');
+    return `<div class="dep-hand">${chips}</div>
+      <p class="muted small">Höchstens 1 Depesche pro Zug · Handlimit ${DEPESCHE_HAND_LIMIT}.</p>`;
+  }
+
   renderOrdenInfo() {
     const s = this.ctx.state;
     let h = `<h3>Orden-Belohnung</h3>`;
@@ -715,6 +902,8 @@ export class GameView {
       if (s.phase === 'attack') targets = validAttackTargets(s, this.sel.from);
       if (s.phase === 'fortify' && !this.sel.to) reach = reachableOwn(s, this.sel.from);
     }
+    // Scharfgeschaltete Depesche markiert ihre eigenen Zielgebiete und ruht die Phasenauswahl.
+    const depTargets = mine && this.depesche ? this.depescheTargets() : new Set();
     const pm = s.pendingMove;
 
     let out = `
@@ -772,15 +961,18 @@ export class GameView {
       const own = st.owner === me;
       const clickable =
         mine &&
-        (((s.phase === 'setup' || s.phase === 'reinforce') && own) ||
-          (s.phase === 'attack' && !pm && ((own && st.troops >= 2) || targets.has(t.id))) ||
-          (s.phase === 'fortify' && own));
+        (this.depesche
+          ? depTargets.has(t.id)
+          : ((s.phase === 'setup' || s.phase === 'reinforce') && own) ||
+            (s.phase === 'attack' && !pm && ((own && st.troops >= 2) || targets.has(t.id))) ||
+            (s.phase === 'fortify' && own));
       const cls = [
         'terr',
         clickable && 'clickable',
+        this.depesche?.from === t.id && 'selected',
         this.sel.from === t.id && 'selected',
         this.sel.to === t.id && (s.phase === 'attack' ? 'target' : 'selected'),
-        (targets.has(t.id) || reach.has(t.id)) && this.sel.to !== t.id && 'candidate',
+        (targets.has(t.id) || reach.has(t.id) || depTargets.has(t.id)) && this.sel.to !== t.id && this.depesche?.from !== t.id && 'candidate',
         pm && (pm.from === t.id || pm.to === t.id) && 'selected',
         DEBUG && this.debugMode === 'borders' && this.editId === t.id && 'editing',
         DEBUG && this.debugMode === 'sea' && this.seaFrom === t.id && 'selected',
@@ -839,12 +1031,43 @@ export class GameView {
         if (this.ctx.mode === 'host') {
           h += `<button class="ghost small" data-act="skip">Zug überspringen</button>`;
         }
+      } else if (this.depesche) {
+        h += this.depeschePanel();
       } else {
         h += this.phasePanel();
       }
     }
     h += this.combatHtml();
     this.$('panel').innerHTML = h;
+  }
+
+  // Interaktion einer scharfgeschalteten Depesche im Hauptpanel (nutzt denselben [data-range]-Listener).
+  depeschePanel() {
+    const s = this.ctx.state;
+    const d = this.depesche;
+    const card = DEPESCHE_CARDS[d.id];
+    const tn = (id) => `<strong>${esc(territoryName(id))}</strong>`;
+    const cancel = `<button class="ghost" data-act="cancelDep">Abbrechen</button>`;
+    const head = `<p class="label">Depesche: ${esc(card.name)}</p>`;
+    if (d.id === 'nachschub') {
+      return `${head}<p>Klicke dein Zielgebiet (+3 Truppen).</p><div class="row">${cancel}</div>`;
+    }
+    if (d.id === 'sabotage') {
+      return `${head}<p>Klicke ein gegnerisches Gebiet (−3 Truppen, nie unter 1).</p><div class="row">${cancel}</div>`;
+    }
+    if (d.need === 'from') {
+      return `${head}<p>Wähle dein Startgebiet (mind. 2 Truppen).</p><div class="row">${cancel}</div>`;
+    }
+    if (d.need === 'to') {
+      const hint = d.id === 'gewaltmarsch' ? 'über eigene Gebiete verbunden' : 'beliebiges eigenes Gebiet';
+      return `${head}<p>Von ${tn(d.from)} aus: wähle das Ziel (${hint}).</p><div class="row">${cancel}</div>`;
+    }
+    const max = s.territories[d.from].troops - 1;
+    const v = clamp(this.moveCount ?? max, 1, max);
+    this.moveCount = v;
+    return `${head}<p>Von ${tn(d.from)} nach ${tn(d.to)} verschieben:</p>
+      <div class="range"><input type="range" data-range min="1" max="${max}" value="${v}"><output data-out>${v}</output></div>
+      <div class="row"><button data-act="playDep">Spielen</button>${cancel}</div>`;
   }
 
   amountButtons(options) {
@@ -959,12 +1182,17 @@ export class GameView {
         const offline = this.ctx.mode !== 'local' && lp && !lp.connected;
         const you = this.ctx.mode !== 'local' && pid === this.ctx.myId;
         const stages = p.stagesDone || [false, false];
+        // Eigene Hand kennt die genaue Zahl; fremde nur über depeschenCount aus viewFor.
+        const depCount = p.depeschen?.length ?? p.depeschenCount ?? 0;
+        const depBadge = s.missions && p.alive && depCount
+          ? ` <span class="dep-count" title="Depeschen auf der Hand">✉ ${depCount}</span>`
+          : '';
         const missionDots = s.missions && p.alive
           ? ` <span class="mission-dots" title="Missionsfortschritt (Etappe 1, Etappe 2, Endziel)">${stages[0] ? '●' : '○'}${stages[1] ? '●' : '○'}${p.id === s.winner ? '●' : '○'}</span>`
           : '';
         return `<li class="${pid === cur && s.phase !== 'gameover' ? 'current' : ''} ${p.alive ? '' : 'dead'}">
           <span class="dot" style="background:${p.color}"></span>
-          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${missionDots}</span>
+          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${depBadge}${missionDots}</span>
           <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
         </li>`;
       })

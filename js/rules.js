@@ -56,6 +56,11 @@ export function viewFor(state, playerId) {
   const v = structuredClone(state);
   // Private Log-Einträge nur für die berechtigten Spieler behalten
   v.log = (v.log || []).filter((e) => !e.visibleTo || e.visibleTo.includes(playerId));
+  // Stapelinhalte/-reihenfolge sind geheim – nur Anzahlen zeigen
+  if (v.depeschenDeck) v.depeschenDeckCount = { 1: v.depeschenDeck[1].length, 2: v.depeschenDeck[2].length };
+  if (v.depeschenDiscard) v.depeschenDiscardCount = { 1: v.depeschenDiscard[1].length, 2: v.depeschenDiscard[2].length };
+  delete v.depeschenDeck;
+  delete v.depeschenDiscard;
   for (const p of v.players || []) {
     if (p.id === playerId) continue; // eigene Infos bleiben vollständig
     if (v.phase === 'gameover' && p.id === v.winner) continue; // Sieger-Mission wird aufgedeckt
@@ -69,6 +74,50 @@ export function viewFor(state, playerId) {
     }
   }
   return v;
+}
+
+// ---------------------------------------------------------------- Depeschen
+export const DEPESCHE_HAND_LIMIT = 3;
+export const DEPESCHE_COPIES = 2;
+// Nur Karten ohne 🔗-Abhängigkeit (General/Nebel) und ohne Pranger (Schritt 5).
+// Weitere Karten kommen in späteren Schritten dazu und werden dann hier ergänzt.
+export const DEPESCHE_CARDS = {
+  // Stufe I – Taktik
+  gewaltmarsch: { level: 1, name: 'Gewaltmarsch', phases: ['attack', 'fortify'], info: 'Einmal zusätzlich über eigene Gebiete verschieben, ohne den Zug zu beenden.' },
+  nachschub: { level: 1, name: 'Nachschub', phases: ['reinforce', 'attack', 'fortify'], info: '+3 Truppen auf ein beliebiges eigenes Gebiet.' },
+  // Stufe II – stark
+  luftbruecke: { level: 2, name: 'Luftbrücke', phases: ['attack', 'fortify'], info: 'Truppen zwischen zwei beliebigen eigenen Gebieten verschieben – ohne Verbindung.' },
+  sabotage: { level: 2, name: 'Sabotage', phases: ['reinforce', 'attack', 'fortify'], info: 'Ein gegnerisches Gebiet verliert 3 Truppen (nie unter 1).' },
+  ueberraschung: { level: 2, name: 'Überraschungsangriff', phases: ['attack'], info: 'Bei deiner nächsten Angriffsaktion gewinnt der Angreifer bei Gleichstand.' },
+};
+export const depescheName = (id) => DEPESCHE_CARDS[id]?.name ?? id;
+
+function buildDepescheDecks(rng) {
+  const deck = { 1: [], 2: [] };
+  for (const [id, c] of Object.entries(DEPESCHE_CARDS)) {
+    for (let i = 0; i < DEPESCHE_COPIES; i++) deck[c.level].push(id);
+  }
+  return { 1: shuffle(deck[1], rng), 2: shuffle(deck[2], rng) };
+}
+
+// Eine Karte der Stufe `level` ziehen; leerer Nachziehstapel -> Ablage neu mischen.
+function drawDepesche(s, level, rng) {
+  const deck = s.depeschenDeck[level];
+  if (!deck.length) {
+    const disc = s.depeschenDiscard[level];
+    if (!disc.length) return null;
+    s.depeschenDeck[level] = shuffle(disc, rng);
+    s.depeschenDiscard[level] = [];
+  }
+  return s.depeschenDeck[level].pop() ?? null;
+}
+
+// Belohnungswahl auslösen: 2 Karten ziehen, in die Warteschlange des Spielers legen.
+function grantDepescheChoice(s, pid, level, rng) {
+  const cards = [drawDepesche(s, level, rng), drawDepesche(s, level, rng)].filter(Boolean);
+  if (!cards.length) return;
+  const p = playerById(s, pid);
+  (p.depeschenChoice ||= []).push({ level, cards });
 }
 
 // ---------------------------------------------------------------- Missionen
@@ -239,17 +288,19 @@ function stage2Met(s, pid) {
   return false;
 }
 
-// Eine Etappe als erreicht markieren und +2 Truppen gutschreiben (einmalig).
-function reachStage(s, pid, idx) {
+// Eine Etappe als erreicht markieren: +2 Truppen und eine Depeschen-Wahl (einmalig).
+function reachStage(s, pid, idx, rng = Math.random) {
   const p = playerById(s, pid);
   if (!p?.mission || p.stagesDone[idx]) return;
   p.stagesDone[idx] = true;
   p.stageBonus += MISSION_STAGE_BONUS;
-  addLog(s, `${p.name} hat eine Etappe erreicht (+${MISSION_STAGE_BONUS} Truppen).`); // welche bleibt geheim
+  const level = idx === 0 ? 1 : 2; // Etappe 1 -> Stufe I, Etappe 2 -> Stufe II
+  grantDepescheChoice(s, pid, level, rng);
+  addLog(s, `${p.name} hat eine Etappe erreicht (+${MISSION_STAGE_BONUS} Truppen, 1 Depesche).`); // welche bleibt geheim
 }
 
 // Etappe 1 = Ereignis, nach jeder Eroberung geprüft (nutzt turnStats des Spielers am Zug).
-function checkStage1(s, pid) {
+function checkStage1(s, pid, rng) {
   if (!s.missions) return;
   const p = playerById(s, pid);
   const m = p?.mission;
@@ -266,13 +317,13 @@ function checkStage1(s, pid) {
     ok = (ts.conqueredFrom[m.target] || 0) >= MISSION_TARGETS.vernichtung.stage1From;
   }
   // g_bollwerk (Abwehr) und f_feldherr (General) sind keine Eroberungs-Ereignisse → hier nichts
-  if (ok) reachStage(s, pid, 0);
+  if (ok) reachStage(s, pid, 0, rng);
 }
 
 // Etappe 2 = Zustand, am Ende des eigenen Zugs geprüft (für alle Missionen).
-function checkStage2(s, pid) {
+function checkStage2(s, pid, rng) {
   if (!s.missions) return;
-  if (stage2Met(s, pid)) reachStage(s, pid, 1);
+  if (stage2Met(s, pid)) reachStage(s, pid, 1, rng);
 }
 
 // Abwehr zählen (§5.2): Gebiet nach der Angriffsaktion noch beim Verteidiger -> +1.
@@ -438,7 +489,13 @@ export function createGame(players, rng = Math.random, options = {}) {
       p.stagesDone = [false, false]; // [Etappe 1, Etappe 2]
       p.stageBonus = 0; // +2 je erreichter Etappe, fließt in die nächste Verstärkung
       p.stats = { defendedSinceOwnTurn: 0 }; // Bollwerk-Zähler (dauerhaft)
+      p.depeschen = []; // Hand (max. DEPESCHE_HAND_LIMIT)
+      p.depeschenChoice = []; // offene Belohnungs-Wahlen (Warteschlange)
     }
+    state.depeschenDeck = buildDepescheDecks(rng);
+    state.depeschenDiscard = { 1: [], 2: [] };
+    state.depeschePlayedThisTurn = false;
+    state.tieBreakAttacker = null; // Überraschungsangriff: Gleichstand geht an diesen Angreifer
   }
 
   addLog(state, `Spiel gestartet. Reihenfolge: ${order.map((id) => playerName(state, id)).join(', ')}.`);
@@ -465,15 +522,17 @@ function advanceSetup(s) {
   startTurn(s);
 }
 
-function startTurn(s) {
+function startTurn(s, rng = Math.random) {
   const pid = currentPlayerId(s);
   // Zähler für diesen Zug zurücksetzen
   s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  s.depeschePlayedThisTurn = false;
+  s.tieBreakAttacker = null;
   if (s.missions) {
     // Bollwerk-Etappe 1 (Abwehr) zu Zugbeginn prüfen, damit der Bonus sofort zählt
     const p = playerById(s, pid);
     if (p.mission?.id === 'g_bollwerk' && !p.stagesDone[0] && (p.stats?.defendedSinceOwnTurn || 0) >= MISSION_TARGETS.g_bollwerk.stage1Defends) {
-      reachStage(s, pid, 0);
+      reachStage(s, pid, 0, rng);
     }
     if (p.stats) p.stats.defendedSinceOwnTurn = 0; // Zähler ab eigenem Zugbeginn neu
   }
@@ -496,7 +555,7 @@ function startTurn(s) {
 function finishTurn(s, rng = Math.random) {
   const ender = playerById(s, currentPlayerId(s));
   // Zustands-Etappe (Etappe 2) am Ende des eigenen Zugs prüfen (vor dem Spielerwechsel)
-  checkStage2(s, ender.id);
+  checkStage2(s, ender.id, rng);
   // Wer in diesem Zug mindestens ein Gebiet erobert hat, bekommt einen Orden
   if (s.conqueredThisTurn && ender.alive) {
     const type = ORDEN_TYPES[Math.floor(rng() * ORDEN_TYPES.length)];
@@ -513,7 +572,7 @@ function finishTurn(s, rng = Math.random) {
     }
   }
   s.turn++;
-  startTurn(s);
+  startTurn(s, rng);
 }
 
 function forceSkip(s, rng = Math.random) {
@@ -551,18 +610,20 @@ function battleRound(s, fromId, toId, attDice, rng) {
   const defDice = Math.min(2, to.troops);
   const att = Array.from({ length: attDice }, () => rollDie(rng)).sort((a, b) => b - a);
   const def = Array.from({ length: defDice }, () => rollDie(rng)).sort((a, b) => b - a);
+  // Überraschungsangriff (Depesche): für diesen Angreifer gewinnt Gleichstand
+  const tieToAtt = s.tieBreakAttacker && s.tieBreakAttacker === from.owner;
   let attLoss = 0;
   let defLoss = 0;
   for (let i = 0; i < Math.min(att.length, def.length); i++) {
-    if (att[i] > def[i]) defLoss++;
-    else attLoss++; // Gleichstand gewinnt der Verteidiger
+    if (att[i] > def[i] || (att[i] === def[i] && tieToAtt)) defLoss++;
+    else attLoss++; // sonst gewinnt bei Gleichstand der Verteidiger
   }
   from.troops -= attLoss;
   to.troops -= defLoss;
   return { att, def, attLoss, defLoss };
 }
 
-function conquer(s, fromId, toId, dice, pid) {
+function conquer(s, fromId, toId, dice, pid, rng = Math.random) {
   const from = s.territories[fromId];
   const to = s.territories[toId];
   const prevOwner = to.owner;
@@ -610,7 +671,67 @@ function conquer(s, fromId, toId, dice, pid) {
   if (min === max) moveTroops(from, to, min);
   else s.pendingMove = { from: fromId, to: toId, min, max };
 
-  checkStage1(s, pid); // Ereignis-Etappe direkt nach der Eroberung prüfen
+  checkStage1(s, pid, rng); // Ereignis-Etappe direkt nach der Eroberung prüfen
+}
+
+// ---------------------------------------------------------------- Depeschen spielen
+
+// Effekt einer ausgespielten Depesche. Gibt Fehlertext zurück oder null.
+// (Bei Fehler verwirft applyAction den geklonten Zustand ohnehin komplett.)
+function playDepescheEffect(s, id, a, pid) {
+  const own = (tid) => s.territories[tid] && s.territories[tid].owner === pid;
+  if (id === 'nachschub') {
+    if (!own(a.target)) return 'Wähle ein eigenes Gebiet.';
+    s.territories[a.target].troops += 3;
+    return null;
+  }
+  if (id === 'sabotage') {
+    const t = s.territories[a.target];
+    if (!t) return 'Unbekanntes Gebiet.';
+    if (t.owner === pid) return 'Sabotage trifft nur gegnerische Gebiete.';
+    t.troops = Math.max(1, t.troops - 3);
+    return null;
+  }
+  if (id === 'gewaltmarsch' || id === 'luftbruecke') {
+    const from = s.territories[a.from];
+    const to = s.territories[a.to];
+    if (!own(a.from) || !own(a.to)) return 'Beide Gebiete müssen dir gehören.';
+    if (a.from === a.to) return 'Start und Ziel müssen verschieden sein.';
+    if (id === 'gewaltmarsch' && !reachableOwn(s, a.from).has(a.to)) return 'Nur über eigene Gebiete verbunden möglich.';
+    const count = toInt(a.count);
+    if (!(count >= 1 && count <= from.troops - 1)) return `Du kannst 1 bis ${from.troops - 1} Truppe(n) verschieben.`;
+    moveTroops(from, to, count);
+    return null;
+  }
+  if (id === 'ueberraschung') {
+    s.tieBreakAttacker = pid;
+    return null;
+  }
+  return 'Unbekannte Depesche.';
+}
+
+// Belohnungs-Wahl auflösen (darf auch außerhalb des eigenen Zugs geschehen).
+function chooseDepesche(s, pid, keep, discardIdx) {
+  const p = playerById(s, pid);
+  const choice = p?.depeschenChoice?.[0];
+  if (!choice) return 'Du hast gerade keine Depeschen-Wahl offen.';
+  const kept = keep === 'a' ? choice.cards[0] : keep === 'b' ? choice.cards[1] : null;
+  if (keep != null && keep !== 'a' && keep !== 'b') return 'Ungültige Wahl.';
+  if ((keep === 'a' && !choice.cards[0]) || (keep === 'b' && !choice.cards[1])) return 'Diese Karte gibt es nicht.';
+  if (kept) {
+    if (p.depeschen.length >= DEPESCHE_HAND_LIMIT) {
+      const di = toInt(discardIdx);
+      if (!(di >= 0 && di < p.depeschen.length)) return 'Deine Hand ist voll – lege eine Karte ab oder verwirf die neue.';
+      const dropped = p.depeschen.splice(di, 1)[0];
+      s.depeschenDiscard[DEPESCHE_CARDS[dropped].level].push(dropped);
+    }
+    p.depeschen.push(kept);
+  }
+  // nicht behaltene (gezogene) Karten wandern auf die Ablage
+  for (const c of choice.cards) if (c !== kept) s.depeschenDiscard[DEPESCHE_CARDS[c].level].push(c);
+  p.depeschenChoice.shift();
+  addLog(s, kept ? `Du behältst eine Depesche: ${depescheName(kept)}.` : 'Du verwirfst die gezogenen Depeschen.', [pid]);
+  return null;
 }
 
 // ---------------------------------------------------------------- Aktionen
@@ -664,6 +785,25 @@ const HANDLERS = {
     return null;
   },
 
+  playDepesche(s, a, pid) {
+    if (!s.missions) return 'Depeschen sind in dieser Partie nicht aktiv.';
+    if (s.depeschePlayedThisTurn) return 'Du kannst pro Zug nur eine Depesche spielen.';
+    if (s.pendingMove) return 'Lege zuerst fest, wie viele Truppen nachrücken.';
+    const p = playerById(s, pid);
+    const idx = toInt(a.index);
+    if (!(idx >= 0 && idx < (p.depeschen?.length || 0))) return 'Ungültige Depesche.';
+    const id = p.depeschen[idx];
+    const card = DEPESCHE_CARDS[id];
+    if (!card.phases.includes(s.phase)) return `${card.name} kannst du in dieser Phase nicht spielen.`;
+    const err = playDepescheEffect(s, id, a, pid);
+    if (err) return err;
+    p.depeschen.splice(idx, 1);
+    s.depeschenDiscard[card.level].push(id);
+    s.depeschePlayedThisTurn = true;
+    addLog(s, `${playerName(s, pid)} spielt eine Depesche: ${card.name}.`);
+    return null;
+  },
+
   attack(s, a, pid, rng) {
     const err = checkAttack(s, a.from, a.to, pid);
     if (err) return err;
@@ -684,8 +824,9 @@ const HANDLERS = {
       `${playerName(s, pid)} greift ${territoryName(a.to)} (${playerName(s, defender)}) an: ` +
         `[${r.att.join(' ')}] gegen [${r.def.join(' ')}] – Verluste ${r.attLoss}:${r.defLoss}.`,
     );
-    if (s.territories[a.to].troops === 0) conquer(s, a.from, a.to, dice, pid);
+    if (s.territories[a.to].troops === 0) conquer(s, a.from, a.to, dice, pid, rng);
     else countDefense(s, a.to, defender);
+    if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
   },
 
@@ -716,8 +857,9 @@ const HANDLERS = {
       `${playerName(s, pid)} startet einen Blitz-Angriff von ${territoryName(a.from)} auf ` +
         `${territoryName(a.to)} (${playerName(s, defender)}): ${rounds} Runde(n), Verluste ${attLoss}:${defLoss}.`,
     );
-    if (to.troops === 0) conquer(s, a.from, a.to, dice, pid);
+    if (to.troops === 0) conquer(s, a.from, a.to, dice, pid, rng);
     else countDefense(s, a.to, defender);
+    if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
   },
 
@@ -782,6 +924,11 @@ export function applyAction(prev, action, actorId, rng = Math.random) {
   // Missionswahl ist unabhängig vom Zug (jeder wählt zu Beginn für sich)
   if (action.type === 'chooseMission') {
     const err = chooseMission(s, actorId, action.id);
+    return err ? { error: err } : { state: s };
+  }
+  // Depeschen-Wahl darf auch außerhalb des eigenen Zugs ausgeführt werden (§6.2)
+  if (action.type === 'chooseDepesche') {
+    const err = chooseDepesche(s, actorId, action.keep, action.discard);
     return err ? { error: err } : { state: s };
   }
   if (actorId !== currentPlayerId(s)) return { error: 'Du bist nicht am Zug.' };

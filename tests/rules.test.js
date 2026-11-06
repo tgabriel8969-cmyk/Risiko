@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import { TERRITORIES, ADJACENCY, EDGES, CONTINENTS, CONTINENT_TERRITORIES, TERRITORY_BY_ID } from '../js/map.js';
 import {
   createGame, applyAction, currentPlayerId, countTerritories, calcReinforcements,
-  validAttackTargets, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
+  validAttackTargets, reachableOwn, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
   missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
+  DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT,
 } from '../js/rules.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
@@ -467,6 +468,157 @@ test('Bollwerk: Abwehr zählt pro Aktion; Etappe 1 greift zu Zugbeginn', () => {
   assert.equal(dp.stats.defendedSinceOwnTurn, 0, 'Abwehrzähler ab eigenem Zugbeginn zurückgesetzt');
 });
 
+// ------------------------------------------------------------------ Depeschen (Schritt 4)
+
+// Gibt einem Spieler direkt eine Karte in die Hand und bereitet die Phase vor.
+function giveDepesche(s, pid, id, phase = 'attack') {
+  const p = s.players.find((x) => x.id === pid);
+  p.depeschen = [id];
+  s.phase = phase;
+  s.current = s.order.indexOf(pid);
+  s.pendingMove = null;
+  s.depeschePlayedThisTurn = false;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  return p;
+}
+
+test('Depesche: Etappe-1-Belohnung legt eine Stufe-I-Wahl an', () => {
+  let s = createGame(players(3), seeded(200), { missions: true });
+  const pid = currentPlayerId(s);
+  setMission(s, pid, { id: 'g_weltmacht' });
+  const other = s.order.find((id) => id !== pid);
+  const hub = 'ontario';
+  const neigh = ADJACENCY[hub].slice(0, 3);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+  s.territories[hub] = { owner: pid, troops: 30 };
+  for (const t of neigh) s.territories[t] = { owner: other, troops: 1 };
+  s.phase = 'attack'; s.current = s.order.indexOf(pid);
+  s.pendingMove = null; s.conqueredThisTurn = false;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  let st = s;
+  for (const t of neigh) {
+    let r = applyAction(st, { type: 'blitz', from: hub, to: t }, pid, diceSeq([6, 6, 6, 1]));
+    st = r.state;
+    if (st.pendingMove) st = applyAction(st, { type: 'occupy', count: st.pendingMove.min }, pid).state;
+  }
+  const p = st.players.find((x) => x.id === pid);
+  assert.equal(p.depeschenChoice.length, 1);
+  assert.equal(p.depeschenChoice[0].level, 1);
+  assert.equal(p.depeschenChoice[0].cards.length, 2);
+  for (const c of p.depeschenChoice[0].cards) assert.equal(DEPESCHE_CARDS[c].level, 1);
+});
+
+test('chooseDepesche: behalten, Handlimit mit Ablegen, außerhalb des Zugs erlaubt', () => {
+  let s = createGame(players(3), seeded(201), { missions: true });
+  const me = s.order[1]; // NICHT der aktuelle Spieler
+  const p = s.players.find((x) => x.id === me);
+  p.depeschenChoice = [{ level: 1, cards: ['gewaltmarsch', 'nachschub'] }];
+  // außerhalb des eigenen Zugs wählbar
+  let r = applyAction(s, { type: 'chooseDepesche', keep: 'a' }, me);
+  assert.ifError(r.error);
+  let st = r.state;
+  let pp = st.players.find((x) => x.id === me);
+  assert.deepEqual(pp.depeschen, ['gewaltmarsch']);
+  assert.equal(pp.depeschenChoice.length, 0);
+  assert.equal(st.depeschenDiscard[1].includes('nachschub'), true, 'nicht gewählte Karte auf Ablage');
+
+  // Hand voll -> Ablegen nötig
+  pp.depeschen = ['gewaltmarsch', 'nachschub', 'sabotage'];
+  pp.depeschenChoice = [{ level: 2, cards: ['luftbruecke', 'ueberraschung'] }];
+  assert.ok(applyAction(st, { type: 'chooseDepesche', keep: 'a' }, me).error, 'Hand voll ohne Ablegen');
+  const r2 = applyAction(st, { type: 'chooseDepesche', keep: 'a', discard: 0 }, me);
+  assert.ifError(r2.error);
+  assert.equal(r2.state.players.find((x) => x.id === me).depeschen.length, DEPESCHE_HAND_LIMIT);
+  assert.equal(r2.state.players.find((x) => x.id === me).depeschen.includes('luftbruecke'), true);
+});
+
+test('playDepesche: Nachschub, Sabotage, Luftbrücke, nur 1 pro Zug, Phasenprüfung', () => {
+  let s = createGame(players(3), seeded(202), { missions: true });
+  const pid = currentPlayerId(s);
+  const other = s.order.find((id) => id !== pid);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: pid, troops: 2 };
+  const enemy = Object.keys(s.territories)[0];
+  s.territories[enemy] = { owner: other, troops: 5 };
+
+  // Nachschub: +3 auf eigenes Gebiet
+  let p = giveDepesche(s, pid, 'nachschub', 'reinforce');
+  const target = Object.keys(s.territories).find((t) => s.territories[t].owner === pid);
+  let r = applyAction(s, { type: 'playDepesche', index: 0, target }, pid);
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[target].troops, 5);
+  assert.equal(r.state.depeschePlayedThisTurn, true);
+  // zweite Depesche im selben Zug abgelehnt
+  const s2 = r.state; s2.players.find((x) => x.id === pid).depeschen = ['sabotage'];
+  assert.match(applyAction(s2, { type: 'playDepesche', index: 0, target: enemy }, pid).error, /nur eine Depesche/);
+
+  // Sabotage: -3 beim Gegner, nie unter 1
+  let s3 = createGame(players(3), seeded(203), { missions: true });
+  const a3 = currentPlayerId(s3); const o3 = s3.order.find((id) => id !== a3);
+  for (const t of Object.keys(s3.territories)) s3.territories[t] = { owner: a3, troops: 2 };
+  const foe = Object.keys(s3.territories)[0]; s3.territories[foe] = { owner: o3, troops: 2 };
+  giveDepesche(s3, a3, 'sabotage', 'attack');
+  r = applyAction(s3, { type: 'playDepesche', index: 0, target: foe }, a3);
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[foe].troops, 1, 'min. 1');
+
+  // Luftbrücke: ohne Verbindung verschieben
+  let s4 = createGame(players(3), seeded(204), { missions: true });
+  const a4 = currentPlayerId(s4);
+  const ids = Object.keys(s4.territories);
+  for (const t of ids) s4.territories[t] = { owner: a4, troops: 1 };
+  const from = ids[0]; const to = ids[ids.length - 1]; // garantiert nicht benachbart genutzt
+  s4.territories[from] = { owner: a4, troops: 6 };
+  giveDepesche(s4, a4, 'luftbruecke', 'fortify');
+  r = applyAction(s4, { type: 'playDepesche', index: 0, from, to, count: 4 }, a4);
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[to].troops, 5);
+  assert.equal(r.state.territories[from].troops, 2);
+
+  // Phasenprüfung: Luftbrücke in reinforce nicht erlaubt
+  let s5 = createGame(players(3), seeded(205), { missions: true });
+  const a5 = currentPlayerId(s5);
+  for (const t of Object.keys(s5.territories)) s5.territories[t] = { owner: a5, troops: 3 };
+  giveDepesche(s5, a5, 'luftbruecke', 'reinforce');
+  const two = Object.keys(s5.territories);
+  assert.match(applyAction(s5, { type: 'playDepesche', index: 0, from: two[0], to: two[1], count: 1 }, a5).error, /Phase/);
+});
+
+test('playDepesche: Überraschungsangriff gewinnt den nächsten Gleichstand', () => {
+  let s = createGame(players(3), seeded(206), { missions: true });
+  const pid = currentPlayerId(s);
+  const other = s.order.find((id) => id !== pid);
+  const from = 'ontario'; const to = ADJACENCY['ontario'].find((n) => true);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: pid, troops: 2 };
+  s.territories[from] = { owner: pid, troops: 5 };
+  s.territories[to] = { owner: other, troops: 2 };
+  giveDepesche(s, pid, 'ueberraschung', 'attack');
+  let r = applyAction(s, { type: 'playDepesche', index: 0 }, pid);
+  assert.ifError(r.error);
+  assert.equal(r.state.tieBreakAttacker, pid);
+  // Gleichstand 3:3 → mit Überraschung verliert der Verteidiger
+  r = applyAction(r.state, { type: 'attack', from, to, dice: 1 }, pid, diceSeq([3, 3]));
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[to].troops, 1, 'Verteidiger verliert bei Gleichstand');
+  assert.equal(r.state.tieBreakAttacker, null, 'Flag verbraucht');
+});
+
+test('viewFor: fremde Depeschen-Hand, Wahl und Stapelinhalt sind verborgen', () => {
+  let s = createGame(players(3), seeded(207), { missions: true });
+  const [p0, p1] = s.players;
+  p0.depeschen = ['sabotage', 'nachschub'];
+  p0.depeschenChoice = [{ level: 1, cards: ['gewaltmarsch', 'nachschub'] }];
+  const v = viewFor(s, p1.id);
+  const seen = v.players.find((x) => x.id === p0.id);
+  assert.equal(seen.depeschen, undefined);
+  assert.equal(seen.depeschenCount, 2);
+  assert.equal(seen.depeschenChoice, undefined);
+  assert.equal(v.depeschenDeck, undefined, 'Stapelinhalt verborgen');
+  assert.ok(v.depeschenDeckCount[1] >= 0, 'nur Anzahl sichtbar');
+  // eigene Sicht behält alles
+  const own = viewFor(s, p0.id).players.find((x) => x.id === p0.id);
+  assert.deepEqual(own.depeschen, ['sabotage', 'nachschub']);
+});
+
 // ------------------------------------------------------------------ Simulation
 
 function botAction(s, rng) {
@@ -477,6 +629,34 @@ function botAction(s, rng) {
   const self = s.players.find((p) => p.id === pid);
   if (s.missions && self.missionOptions && !self.mission) {
     return { type: 'chooseMission', id: pick(self.missionOptions).id };
+  }
+  // Offene Depeschen-Wahl auflösen (behalten, Hand ggf. erleichtern)
+  if (self.depeschenChoice && self.depeschenChoice.length) {
+    const full = (self.depeschen?.length || 0) >= DEPESCHE_HAND_LIMIT;
+    return { type: 'chooseDepesche', keep: rng() < 0.85 ? 'a' : null, discard: full ? 0 : undefined };
+  }
+  // Gelegentlich eine spielbare Depesche ausspielen
+  if (s.missions && !s.depeschePlayedThisTurn && !s.pendingMove && self.depeschen?.length && rng() < 0.4) {
+    const hand = self.depeschen;
+    for (let i = 0; i < hand.length; i++) {
+      const card = DEPESCHE_CARDS[hand[i]];
+      if (!card.phases.includes(s.phase)) continue;
+      const id = hand[i];
+      if (id === 'ueberraschung') return { type: 'playDepesche', index: i };
+      if (id === 'nachschub') return { type: 'playDepesche', index: i, target: pick(own) };
+      if (id === 'sabotage') {
+        const foes = Object.keys(s.territories).filter((t) => s.territories[t].owner !== pid);
+        if (foes.length) return { type: 'playDepesche', index: i, target: pick(foes) };
+      }
+      if (id === 'gewaltmarsch' || id === 'luftbruecke') {
+        const srcs = own.filter((t) => s.territories[t].troops >= 2);
+        if (srcs.length >= 2) {
+          const from = pick(srcs);
+          const tos = (id === 'gewaltmarsch' ? [...reachableOwn(s, from)] : own).filter((t) => t !== from);
+          if (tos.length) return { type: 'playDepesche', index: i, from, to: pick(tos), count: 1 };
+        }
+      }
+    }
   }
   switch (s.phase) {
     case 'setup':

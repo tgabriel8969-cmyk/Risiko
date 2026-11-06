@@ -1,6 +1,7 @@
 # Spezifikation: Missionen, Etappen & Depeschen
 
-Stand: 05.11.2026 · Status: **beschlossen, noch nicht umgesetzt**
+Stand: 05.11.2026 · Status: **Schritte 1–4 umgesetzt** (Sichtbarkeit, Missions-Pool,
+Etappen, Depeschen inkl. UI). Offen: 5 Pranger · 6 Missions-Bot/Balance · 7 🔗 General · 8 🔗 Nebel.
 
 Diese Datei ist der Auftrag für die Umsetzung. Sie baut auf dem aktuellen Code auf
 (`js/rules.js` mit Orden, `createGame(players, rng, options)`, `HANDLERS`).

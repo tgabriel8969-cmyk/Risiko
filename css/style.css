@@ -209,6 +209,49 @@ input, select {
 .mission-opt strong { font-size: .95rem; }
 .mission-opt .small { line-height: 1.25; }
 
+/* Depeschen-Karte: Hand + Wahl-Dialog */
+.card.depeschen[hidden] { display: none; }
+.dep-count { font-size: .78rem; white-space: nowrap; color: var(--accent); }
+.dep-hand { display: flex; gap: .4rem; flex-wrap: wrap; margin: .1rem 0 .4rem; }
+.dep-chip {
+  display: flex; align-items: center; gap: .4rem; text-align: left;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: .4rem .55rem; border-radius: 8px; font-size: .84rem;
+}
+.dep-chip .dep-lvl {
+  flex: none; font: 700 .68rem var(--font-display); min-width: 1.5em; text-align: center;
+  padding: .05rem .25rem; border-radius: 4px; background: rgba(0,0,0,.3); color: var(--muted);
+}
+.dep-chip.lvl2 .dep-lvl { color: var(--accent); }
+.dep-chip.playable { cursor: pointer; }
+.dep-chip.playable:hover { border-color: var(--accent); }
+.dep-chip.armed { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(224,168,74,.4); }
+.dep-chip.disabled { opacity: .45; cursor: not-allowed; }
+
+.dep-choice {
+  display: grid; gap: .5rem; margin: .2rem 0 .6rem;
+  background: rgba(224,168,74,.08); border: 1px solid var(--accent);
+  border-radius: 10px; padding: .55rem .6rem;
+}
+.dep-choice-cards { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.dep-choice-card {
+  display: grid; gap: .2rem; text-align: left; align-content: start;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: .5rem .55rem; border-radius: 8px; line-height: 1.25; cursor: pointer;
+}
+.dep-choice-card:hover { border-color: var(--accent); }
+.dep-choice-card .dep-lvl {
+  justify-self: start; font: 700 .68rem var(--font-display);
+  padding: .05rem .3rem; border-radius: 4px; background: rgba(0,0,0,.3); color: var(--muted);
+}
+.dep-choice-card.lvl2 .dep-lvl { color: var(--accent); }
+.dep-discard-row { display: flex; gap: .4rem; flex-wrap: wrap; }
+.dep-discard {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: .3rem .5rem; border-radius: 6px; font-size: .8rem; cursor: pointer;
+}
+.dep-discard.sel { border-color: var(--danger); color: var(--danger); }
+
 /* Orden-Ablage unter der Karte (persönlich, eingelassen) */
 .orden-tray {
   width: min(100%, 540px); margin: 0 auto; text-align: center;
