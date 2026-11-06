@@ -79,8 +79,8 @@ export function viewFor(state, playerId) {
 // ---------------------------------------------------------------- Depeschen
 export const DEPESCHE_HAND_LIMIT = 3;
 export const DEPESCHE_COPIES = 2;
-// Nur Karten ohne 🔗-Abhängigkeit (General/Nebel) und ohne Pranger (Schritt 5).
-// Weitere Karten kommen in späteren Schritten dazu und werden dann hier ergänzt.
+// Nur Karten ohne 🔗-Abhängigkeit (General/Nebel). Weitere Karten kommen in
+// späteren Schritten dazu und werden dann hier ergänzt.
 export const DEPESCHE_CARDS = {
   // Stufe I – Taktik
   gewaltmarsch: { level: 1, name: 'Gewaltmarsch', phases: ['attack', 'fortify'], info: 'Einmal zusätzlich über eigene Gebiete verschieben, ohne den Zug zu beenden.' },
@@ -89,6 +89,7 @@ export const DEPESCHE_CARDS = {
   luftbruecke: { level: 2, name: 'Luftbrücke', phases: ['attack', 'fortify'], info: 'Truppen zwischen zwei beliebigen eigenen Gebieten verschieben – ohne Verbindung.' },
   sabotage: { level: 2, name: 'Sabotage', phases: ['reinforce', 'attack', 'fortify'], info: 'Ein gegnerisches Gebiet verliert 3 Truppen (nie unter 1).' },
   ueberraschung: { level: 2, name: 'Überraschungsangriff', phases: ['attack'], info: 'Bei deiner nächsten Angriffsaktion gewinnt der Angreifer bei Gleichstand.' },
+  abgefangen: { level: 2, name: 'Abgefangene Depesche', phases: ['reinforce', 'attack', 'fortify'], info: 'Stellt den Missionstyp eines Gegners für alle sichtbar an den Pranger.' },
 };
 export const depescheName = (id) => DEPESCHE_CARDS[id]?.name ?? id;
 
@@ -112,9 +113,29 @@ function drawDepesche(s, level, rng) {
   return s.depeschenDeck[level].pop() ?? null;
 }
 
+// Lebende Gegner von `pid`, die noch nicht am Pranger stehen (§6.4, Pranger-Ziele).
+function pilloryTargets(s, pid) {
+  return s.players.filter((p) => p.id !== pid && p.alive && p.mission && !p.pillory).map((p) => p.id);
+}
+
+// Wie drawDepesche, aber „Abgefangene Depesche" ohne gültiges Pranger-Ziel wird
+// durch eine andere Stufe-II-Karte ersetzt (§6.4). Nicht nutzbare Karten kommen
+// zurück auf die Ablage, damit sie später (mit gültigem Ziel) wieder ziehbar sind.
+function drawDepescheFor(s, pid, level, rng) {
+  const setAside = [];
+  let card = null;
+  for (let i = 0; i < 20; i++) {
+    card = drawDepesche(s, level, rng);
+    if (card === 'abgefangen' && !pilloryTargets(s, pid).length) { setAside.push(card); card = null; continue; }
+    break;
+  }
+  for (const c of setAside) s.depeschenDiscard[level].push(c);
+  return card;
+}
+
 // Belohnungswahl auslösen: 2 Karten ziehen, in die Warteschlange des Spielers legen.
 function grantDepescheChoice(s, pid, level, rng) {
-  const cards = [drawDepesche(s, level, rng), drawDepesche(s, level, rng)].filter(Boolean);
+  const cards = [drawDepescheFor(s, pid, level, rng), drawDepescheFor(s, pid, level, rng)].filter(Boolean);
   if (!cards.length) return;
   const p = playerById(s, pid);
   (p.depeschenChoice ||= []).push({ level, cards });
@@ -204,6 +225,18 @@ export function missionName(mission, state) {
   if (mission.target) return `Vernichtung: ${state ? playerName(state, mission.target) : mission.target}`;
   if (id === 'f_feldherr') return 'Feldherr';
   return id;
+}
+
+// Öffentlicher Missionstyp (für den Pranger, §6.4). Verrät nicht das konkrete Ziel.
+export const PILLORY_LABEL = { kontinent: 'Kontinent', gebiet: 'Gebiet', vernichtung: 'Vernichtung', feldherr: 'Feldherr' };
+export function missionType(mission) {
+  if (!mission) return null;
+  const id = mission.id;
+  if (id in KONTINENT_MISSIONS) return 'kontinent';
+  if (id === 'g_weltmacht' || id === 'g_bollwerk') return 'gebiet';
+  if (id === 'f_feldherr') return 'feldherr';
+  if (mission.target || id.startsWith('v_')) return 'vernichtung';
+  return null;
 }
 
 /** Ist das Endziel einer Mission aktuell erfüllt? (rein; mission default = die zugeteilte) */
@@ -491,6 +524,7 @@ export function createGame(players, rng = Math.random, options = {}) {
       p.stats = { defendedSinceOwnTurn: 0 }; // Bollwerk-Zähler (dauerhaft)
       p.depeschen = []; // Hand (max. DEPESCHE_HAND_LIMIT)
       p.depeschenChoice = []; // offene Belohnungs-Wahlen (Warteschlange)
+      p.pillory = null; // öffentlicher Missionstyp, sobald enttarnt (§6.4)
     }
     state.depeschenDeck = buildDepescheDecks(rng);
     state.depeschenDiscard = { 1: [], 2: [] };
@@ -705,6 +739,16 @@ function playDepescheEffect(s, id, a, pid) {
   }
   if (id === 'ueberraschung') {
     s.tieBreakAttacker = pid;
+    return null;
+  }
+  if (id === 'abgefangen') {
+    const tgt = playerById(s, a.target);
+    if (!tgt || tgt.id === pid) return 'Wähle einen Gegner.';
+    if (!tgt.alive) return 'Dieser Spieler ist bereits ausgeschieden.';
+    if (!tgt.mission) return 'Dieser Spieler hat noch keine Mission gewählt.';
+    if (tgt.pillory) return 'Dieser Spieler steht bereits am Pranger.';
+    tgt.pillory = { type: missionType(tgt.mission), turn: s.turn };
+    addLog(s, `📜 ${playerName(s, pid)} enttarnt ${playerName(s, tgt.id)}: Missionstyp „${PILLORY_LABEL[tgt.pillory.type]}“.`);
     return null;
   }
   return 'Unbekannte Depesche.';

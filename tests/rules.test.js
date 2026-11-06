@@ -7,7 +7,7 @@ import {
   validAttackTargets, reachableOwn, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
   missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
-  DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT,
+  DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, missionType, PILLORY_LABEL,
 } from '../js/rules.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
@@ -619,6 +619,85 @@ test('viewFor: fremde Depeschen-Hand, Wahl und Stapelinhalt sind verborgen', () 
   assert.deepEqual(own.depeschen, ['sabotage', 'nachschub']);
 });
 
+// ------------------------------------------------------------------ Pranger (Schritt 5)
+
+test('missionType: ordnet jede Mission ihrem öffentlichen Typ zu', () => {
+  assert.equal(missionType({ id: 'k_na_af' }), 'kontinent');
+  assert.equal(missionType({ id: 'g_weltmacht' }), 'gebiet');
+  assert.equal(missionType({ id: 'g_bollwerk' }), 'gebiet');
+  assert.equal(missionType({ id: 'f_feldherr' }), 'feldherr');
+  assert.equal(missionType({ id: 'v_p2', target: 'p2' }), 'vernichtung');
+  assert.equal(missionType(null), null);
+});
+
+test('abgefangen: stellt den Missionstyp eines Gegners öffentlich an den Pranger', () => {
+  let s = createGame(players(3), seeded(300), { missions: true });
+  const pid = currentPlayerId(s);
+  const foe = s.order.find((id) => id !== pid);
+  setMission(s, foe, { id: 'v_p2', target: 'p2' });
+  giveDepesche(s, pid, 'abgefangen', 'reinforce');
+  const r = applyAction(s, { type: 'playDepesche', index: 0, target: foe }, pid);
+  assert.ifError(r.error);
+  const tgt = r.state.players.find((x) => x.id === foe);
+  assert.equal(tgt.pillory.type, 'vernichtung');
+  assert.equal(tgt.pillory.turn, r.state.turn);
+  // öffentlich: auch in fremder Sicht sichtbar, aber ohne die konkrete Mission
+  const seen = viewFor(r.state, s.order.find((id) => id !== pid && id !== foe)).players.find((x) => x.id === foe);
+  assert.equal(seen.pillory.type, 'vernichtung');
+  assert.equal(seen.mission, undefined, 'konkrete Mission bleibt geheim');
+  assert.ok(PILLORY_LABEL[seen.pillory.type]);
+});
+
+test('abgefangen: Fehlerfälle (sich selbst, ausgeschieden, schon am Pranger)', () => {
+  let s = createGame(players(3), seeded(301), { missions: true });
+  const pid = currentPlayerId(s);
+  const foe = s.order.find((id) => id !== pid);
+  setMission(s, foe, { id: 'g_weltmacht' });
+  giveDepesche(s, pid, 'abgefangen', 'attack');
+  assert.match(applyAction(s, { type: 'playDepesche', index: 0, target: pid }, pid).error, /Gegner/);
+  // schon am Pranger
+  s.players.find((x) => x.id === foe).pillory = { type: 'gebiet', turn: 1 };
+  assert.match(applyAction(s, { type: 'playDepesche', index: 0, target: foe }, pid).error, /Pranger/);
+  // ausgeschieden
+  const foe2 = s.players.find((x) => x.id === foe);
+  foe2.pillory = null; foe2.alive = false;
+  assert.match(applyAction(s, { type: 'playDepesche', index: 0, target: foe }, pid).error, /ausgeschieden/);
+});
+
+test('abgefangen: Ausfallregel lässt einen vorhandenen Pranger-Typ unverändert', () => {
+  let s = createGame(players(3), seeded(302), { missions: true });
+  // Spieler mit Vernichtungsmission wird enttarnt (Typ: vernichtung) …
+  const p = s.players[0];
+  p.mission = { id: 'v_p3', target: 'p3' };
+  p.pillory = { type: 'vernichtung', turn: 3 };
+  // … dann greift die Ausfallregel und ändert die Mission auf Weltmacht.
+  p.mission = { id: 'g_weltmacht' };
+  // Der Pranger zeigt weiterhin den Typ zum Zeitpunkt des Aufdeckens.
+  assert.equal(p.pillory.type, 'vernichtung');
+});
+
+test('abgefangen: ohne gültiges Pranger-Ziel wird beim Ziehen ersetzt', () => {
+  let s = createGame(players(3), seeded(303), { missions: true });
+  const pid = currentPlayerId(s);
+  // Etappe-2-Belohnung (Stufe II) soll ausgelöst werden: Weltmacht mit 22 Gebieten (3 Spieler).
+  setMission(s, pid, { id: 'g_weltmacht' });
+  const others = s.order.filter((id) => id !== pid);
+  const ids = Object.keys(s.territories);
+  ids.forEach((t, i) => { s.territories[t] = { owner: i < 22 ? pid : others[i % others.length], troops: 1 }; });
+  // Alle Gegner stehen schon am Pranger → kein gültiges Ziel für 'abgefangen'.
+  for (const id of others) { const p = s.players.find((x) => x.id === id); p.mission = { id: 'g_weltmacht' }; p.pillory = { type: 'gebiet', turn: 1 }; }
+  // Stufe-II-Stapel enthält 'abgefangen' und spielbare Karten – gezogen werden darf nie 'abgefangen'.
+  s.depeschenDeck = { 1: [], 2: ['abgefangen', 'abgefangen', 'sabotage', 'sabotage', 'luftbruecke', 'luftbruecke'] };
+  s.depeschenDiscard = { 1: [], 2: [] };
+  s.phase = 'fortify'; s.current = s.order.indexOf(pid); s.pendingMove = null; s.conqueredThisTurn = false;
+  const r = applyAction(s, { type: 'endTurn' }, pid, seeded(5));
+  assert.ifError(r.error);
+  const me = r.state.players.find((x) => x.id === pid);
+  assert.equal(me.stagesDone[1], true, 'Etappe 2 erreicht');
+  assert.equal(me.depeschenChoice.length, 1, 'Stufe-II-Wahl angelegt');
+  for (const c of me.depeschenChoice[0].cards) assert.notEqual(c, 'abgefangen', 'kein Pranger ohne Ziel');
+});
+
 // ------------------------------------------------------------------ Simulation
 
 function botAction(s, rng) {
@@ -655,6 +734,10 @@ function botAction(s, rng) {
           const tos = (id === 'gewaltmarsch' ? [...reachableOwn(s, from)] : own).filter((t) => t !== from);
           if (tos.length) return { type: 'playDepesche', index: i, from, to: pick(tos), count: 1 };
         }
+      }
+      if (id === 'abgefangen') {
+        const foes = s.players.filter((p) => p.id !== pid && p.alive && !p.pillory);
+        if (foes.length) return { type: 'playDepesche', index: i, target: pick(foes).id };
       }
     }
   }

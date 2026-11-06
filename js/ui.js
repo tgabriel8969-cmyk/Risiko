@@ -8,7 +8,7 @@ import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
   ordenSets, ordenReward, ORDEN_TYPES, ORDEN_LABEL, ORDEN_DYNAMIC, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT,
-  missionProgress, missionName, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT,
+  missionProgress, missionName, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, PILLORY_LABEL,
 } from './rules.js';
 
 export const esc = (s) =>
@@ -252,12 +252,20 @@ export class GameView {
     return playerById(this.ctx.state, this.me())?.depeschen?.[idx] ?? null;
   }
 
+  // Lebende Gegner ohne Pranger – gültige Ziele für „Abgefangene Depesche".
+  // (Dass der Gegner eine Mission gewählt hat, prüft die Regel-Ebene; viewFor verbirgt sie hier.)
+  pilloryOpponents() {
+    const me = this.me();
+    return (this.ctx.state.players || []).filter((p) => p.id !== me && p.alive && !p.pillory);
+  }
+
   // Gültige Zielgebiete der aktuell scharfgeschalteten Depesche (für Markierung & Klickprüfung).
   depescheTargets() {
     const s = this.ctx.state;
     const me = this.me();
     const d = this.depesche;
     if (!d) return new Set();
+    if (d.id === 'abgefangen') return new Set(); // Ziel ist ein Spieler, kein Gebiet
     const ids = Object.keys(s.territories);
     const mineT = (t) => s.territories[t].owner === me;
     if (d.id === 'nachschub') return new Set(ids.filter(mineT));
@@ -276,6 +284,7 @@ export class GameView {
     const me = this.me();
     const t = s.territories[id];
     const d = this.depesche;
+    if (d.id === 'abgefangen') return; // Pranger-Ziel wird über Knöpfe im Panel gewählt, nicht per Karte
     if (d.id === 'nachschub') {
       if (t.owner !== me) return this.showError('Wähle ein eigenes Gebiet.');
       return this.playDepescheArmed({ target: id });
@@ -340,12 +349,17 @@ export class GameView {
         const id = this.handCard(idx);
         if (!id) break;
         if (id === 'ueberraschung') { this.dispatch({ type: 'playDepesche', index: idx }); break; }
-        const need = id === 'gewaltmarsch' || id === 'luftbruecke' ? 'from' : 'target';
+        const need = id === 'abgefangen' ? 'player'
+          : id === 'gewaltmarsch' || id === 'luftbruecke' ? 'from'
+          : 'target';
         this.depesche = { index: idx, id, need, from: null, to: null };
         this.sel = { from: null, to: null }; // normale Auswahl ruhen lassen
         this.render();
         break;
       }
+      case 'pilloryPick':
+        this.playDepescheArmed({ target: data.pid });
+        break;
       case 'playDep':
         if (this.depesche?.need === 'count') {
           this.playDepescheArmed({ from: this.depesche.from, to: this.depesche.to, count: this.moveCount });
@@ -814,17 +828,18 @@ export class GameView {
     const s = this.ctx.state;
     if (!hand.length) return `<p class="muted small">Keine Depeschen – erreiche eine Missions-Etappe für eine Karte.</p>`;
     // Grund, warum eine Karte gerade nicht spielbar ist (sonst null = spielbar).
-    const reasonFor = (card) => {
+    const reasonFor = (id, card) => {
       if (!this.myTurn()) return 'Nur in deinem Zug spielbar.';
       if (s.pendingMove) return 'Lege zuerst das Nachrücken fest.';
       if (s.depeschePlayedThisTurn) return 'Pro Zug nur eine Depesche.';
       if (!card.phases.includes(s.phase)) return `In der Phase „${PHASE_LABEL[s.phase]}“ nicht spielbar.`;
+      if (id === 'abgefangen' && !this.pilloryOpponents().length) return 'Alle Gegner stehen schon am Pranger.';
       return null;
     };
     const armedIdx = this.depesche?.index;
     const chips = hand.map((id, i) => {
       const card = DEPESCHE_CARDS[id];
-      const reason = reasonFor(card);
+      const reason = reasonFor(id, card);
       const armed = armedIdx === i;
       const cls = ['dep-chip', `lvl${card.level}`, reason ? 'disabled' : 'playable', armed ? 'armed' : ''].filter(Boolean).join(' ');
       const title = esc(card.info + (reason ? ` — ${reason}` : ''));
@@ -1049,6 +1064,15 @@ export class GameView {
     const tn = (id) => `<strong>${esc(territoryName(id))}</strong>`;
     const cancel = `<button class="ghost" data-act="cancelDep">Abbrechen</button>`;
     const head = `<p class="label">Depesche: ${esc(card.name)}</p>`;
+    if (d.id === 'abgefangen') {
+      const foes = this.pilloryOpponents();
+      const btns = foes.map((p) =>
+        `<button class="seg-btn" data-act="pilloryPick" data-pid="${esc(p.id)}"><span class="dot" style="background:${p.color}"></span> ${esc(p.name)}</button>`).join('');
+      const body = foes.length
+        ? `<p>Wähle den Gegner, dessen Missionstyp an den Pranger kommt:</p><div class="dep-foe-pick">${btns}</div>`
+        : `<p>Kein gültiges Ziel – alle Gegner stehen schon am Pranger.</p>`;
+      return `${head}${body}<div class="row">${cancel}</div>`;
+    }
     if (d.id === 'nachschub') {
       return `${head}<p>Klicke dein Zielgebiet (+3 Truppen).</p><div class="row">${cancel}</div>`;
     }
@@ -1190,9 +1214,12 @@ export class GameView {
         const missionDots = s.missions && p.alive
           ? ` <span class="mission-dots" title="Missionsfortschritt (Etappe 1, Etappe 2, Endziel)">${stages[0] ? '●' : '○'}${stages[1] ? '●' : '○'}${p.id === s.winner ? '●' : '○'}</span>`
           : '';
+        const pillory = p.pillory
+          ? ` <span class="pillory" title="Am Pranger: Missionstyp enttarnt (seit Zug ${p.pillory.turn})">📜 ${esc(PILLORY_LABEL[p.pillory.type] || p.pillory.type)}</span>`
+          : '';
         return `<li class="${pid === cur && s.phase !== 'gameover' ? 'current' : ''} ${p.alive ? '' : 'dead'}">
           <span class="dot" style="background:${p.color}"></span>
-          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${depBadge}${missionDots}</span>
+          <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${depBadge}${missionDots}${pillory}</span>
           <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
         </li>`;
       })

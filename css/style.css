@@ -251,6 +251,9 @@ input, select {
   padding: .3rem .5rem; border-radius: 6px; font-size: .8rem; cursor: pointer;
 }
 .dep-discard.sel { border-color: var(--danger); color: var(--danger); }
+.dep-foe-pick { display: flex; flex-direction: column; gap: .4rem; }
+.dep-foe-pick .seg-btn { flex: none; display: flex; align-items: center; gap: .5rem; justify-content: flex-start; }
+.pillory { font-size: .72rem; white-space: nowrap; color: var(--danger); }
 
 /* Orden-Ablage unter der Karte (persönlich, eingelassen) */
 .orden-tray {
