@@ -8,7 +8,7 @@ import {
   currentPlayerId, playerById, territoryName, calcReinforcements, validAttackTargets,
   reachableOwn, countTerritories, countTroops, SETUP_BATCH,
   ordenSets, ordenReward, ORDEN_TYPES, ORDEN_LABEL, ORDEN_DYNAMIC, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT,
-  missionProgress, missionName, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, PILLORY_LABEL,
+  missionProgress, missionName, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, PILLORY_LABEL, FIRST_ROUND_ATTACK_LIMIT,
 } from './rules.js';
 
 export const esc = (s) =>
@@ -272,7 +272,7 @@ export class GameView {
     if (d.id === 'abgefangen') return new Set(); // Ziel ist ein Spieler, kein Gebiet
     const ids = Object.keys(s.territories);
     const mineT = (t) => s.territories[t].owner === me;
-    if (d.id === 'nachschub') return new Set(ids.filter(mineT));
+    if (d.id === 'nachschub' || d.id === 'marschbefehl') return new Set(ids.filter(mineT));
     if (d.id === 'sabotage') return new Set(ids.filter((t) => !mineT(t)));
     if (d.need === 'from') return new Set(ids.filter((t) => mineT(t) && s.territories[t].troops >= 2));
     if (d.need === 'to') {
@@ -289,7 +289,7 @@ export class GameView {
     const t = s.territories[id];
     const d = this.depesche;
     if (d.id === 'abgefangen') return; // Pranger-Ziel wird über Knöpfe im Panel gewählt, nicht per Karte
-    if (d.id === 'nachschub') {
+    if (d.id === 'nachschub' || d.id === 'marschbefehl') {
       if (t.owner !== me) return this.showError('Wähle ein eigenes Gebiet.');
       return this.playDepescheArmed({ target: id });
     }
@@ -353,9 +353,14 @@ export class GameView {
         const id = this.handCard(idx);
         if (!id) break;
         if (id === 'ueberraschung') { this.dispatch({ type: 'playDepesche', index: idx }); break; }
+        // Nachschub mit lebendem General: Ziel ist automatisch das Gebiet des Generals (§6.3)
+        if (id === 'nachschub' && s.general) {
+          const g = playerById(s, this.me())?.general;
+          if (g) { this.dispatch({ type: 'playDepesche', index: idx, target: g }); break; }
+        }
         const need = id === 'abgefangen' ? 'player'
           : id === 'gewaltmarsch' || id === 'luftbruecke' ? 'from'
-          : 'target';
+          : 'target'; // nachschub, sabotage, marschbefehl: ein Gebiet anklicken
         this.depesche = { index: idx, id, need, from: null, to: null };
         this.sel = { from: null, to: null }; // normale Auswahl ruhen lassen
         this.render();
@@ -826,7 +831,7 @@ export class GameView {
     }
     return `<div class="dep-choice">
       <p class="label">🎁 Belohnung: wähle eine Depesche (Stufe ${this.depLabel(choice.level)})</p>
-      <div class="dep-choice-cards">${cardBtn('a', choice.cards[0])}${cardBtn('b', choice.cards[1])}</div>
+      <div class="dep-choice-cards">${cardBtn('a', choice.cards[0])}${cardBtn('b', choice.cards[1])}${cardBtn('c', choice.cards[2])}</div>
       ${discardUi}
       <button class="ghost small" data-act="keepDep" data-keep="none">Beide verwerfen</button>
     </div>`;
@@ -928,6 +933,7 @@ export class GameView {
     // Scharfgeschaltete Depesche markiert ihre eigenen Zielgebiete und ruht die Phasenauswahl.
     const depTargets = mine && this.depesche ? this.depescheTargets() : new Set();
     const pm = s.pendingMove;
+    const atkBlocked = this.firstRoundAtkLeft() === 0; // Angriffslimit der ersten Runde ausgeschöpft
 
     let out = `
       <defs>
@@ -995,7 +1001,7 @@ export class GameView {
         (this.depesche
           ? depTargets.has(t.id)
           : ((s.phase === 'setup' || s.phase === 'reinforce') && own) ||
-            (s.phase === 'attack' && !pm && ((own && st.troops >= 2) || targets.has(t.id))) ||
+            (s.phase === 'attack' && !pm && !atkBlocked && ((own && st.troops >= 2) || targets.has(t.id))) ||
             (s.phase === 'fortify' && own));
       const cls = [
         'terr',
@@ -1096,6 +1102,10 @@ export class GameView {
     if (d.id === 'sabotage') {
       return `${head}<p>Klicke ein gegnerisches Gebiet (−3 Truppen, nie unter 1).</p><div class="row">${cancel}</div>`;
     }
+    if (d.id === 'marschbefehl') {
+      const alive = playerById(s, this.me())?.general != null;
+      return `${head}<p>Klicke das eigene Gebiet, in das dein General ${alive ? 'ziehen' : 'wiederbelebt werden'} soll.</p><div class="row">${cancel}</div>`;
+    }
     if (d.need === 'from') {
       return `${head}<p>Wähle dein Startgebiet (mind. 2 Truppen).</p><div class="row">${cancel}</div>`;
     }
@@ -1109,6 +1119,13 @@ export class GameView {
     return `${head}<p>Von ${tn(d.from)} nach ${tn(d.to)} verschieben:</p>
       <div class="range"><input type="range" data-range min="1" max="${max}" value="${v}"><output data-out>${v}</output></div>
       <div class="row"><button data-act="playDep">Spielen</button>${cancel}</div>`;
+  }
+
+  // Verbleibende Angriffe in der ersten Runde (null = kein Limit, weil spätere Runde).
+  firstRoundAtkLeft() {
+    const s = this.ctx.state;
+    if (s.turn > s.order.length) return null;
+    return Math.max(0, FIRST_ROUND_ATTACK_LIMIT - (s.attacksThisTurn || 0));
   }
 
   // Umschalter „General mitnehmen", nur sichtbar wenn mein General auf dem Startgebiet steht.
@@ -1163,6 +1180,8 @@ export class GameView {
                 ${this.generalToggle(pm.from)}
                 <button data-act="occupy">Nachrücken</button>`;
       }
+      const left = this.firstRoundAtkLeft();
+      if (left === 0) return `<p class="hint">In der ersten Runde sind höchstens ${FIRST_ROUND_ATTACK_LIMIT} Angriffe erlaubt – beende deinen Zug.</p>${endBtn}`;
       if (from && to) {
         const f = s.territories[from];
         const t = s.territories[to];
@@ -1182,7 +1201,7 @@ export class GameView {
                 ${none ? 'Keine feindlichen Nachbarn.' : 'Wähle ein markiertes feindliches Nachbargebiet.'}</p>
                 <button class="ghost" data-act="cancel">Abbrechen</button>${endBtn}`;
       }
-      return `<p>Wähle eines deiner Gebiete mit mindestens 2 Truppen als Angreifer.</p>${endBtn}`;
+      return `<p>Wähle eines deiner Gebiete mit mindestens 2 Truppen als Angreifer.${left != null ? ` <span class="muted">(noch ${left} Angriff(e) diese Runde)</span>` : ''}</p>${endBtn}`;
     }
 
     if (s.phase === 'fortify') {

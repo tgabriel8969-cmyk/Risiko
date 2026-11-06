@@ -26,7 +26,7 @@ function missionKey(mission) {
 
 function playGame(seed, n) {
   const rng = seeded(seed);
-  let s = createGame(players(n), rng, { missions: true, ordenMode: seed % 2 ? 'dynamic' : 'static' });
+  let s = createGame(players(n), rng, { missions: true, general: true, ordenMode: seed % 2 ? 'dynamic' : 'static' });
   const assigned = {}; // pid -> Missions-Key (zum Zeitpunkt der Wahl, vor Ausfallregel)
   let firstStager = null; // wer zuerst eine Etappe erreicht hat (Schneeball-Check)
   for (let i = 0; i < 60000 && s.phase !== 'gameover'; i++) {

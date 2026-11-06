@@ -19,6 +19,9 @@ export const PLAYER_COLORS = ['#E69F00', '#56B4E9', '#009E73', '#F0E442', '#0072
 export const START_ARMIES = { 2: 30, 3: 26, 4: 22, 5: 19, 6: 17, 7: 15 };
 // In der Aufstellung setzt jeder reihum bis zu so viele Truppen pro Durchgang
 export const SETUP_BATCH = 3;
+// In der ersten Runde (jeder 1. Zug) höchstens so viele Angriffsaktionen – bremst den
+// Eröffnungs-Schneeball und verhindert, dass wehrlose Spieler sofort ausscheiden.
+export const FIRST_ROUND_ATTACK_LIMIT = 3;
 
 // Orden: Belohnung fürs Erobern (statt Spielkarten). 3 Typen; ein Satz = 3 gleiche
 // oder 3 verschiedene. Bei >= ORDEN_FORCE_AT Orden muss zu Zugbeginn eingelöst werden.
@@ -90,12 +93,15 @@ export const DEPESCHE_CARDS = {
   sabotage: { level: 2, name: 'Sabotage', phases: ['reinforce', 'attack', 'fortify'], info: 'Ein gegnerisches Gebiet verliert 3 Truppen (nie unter 1).' },
   ueberraschung: { level: 2, name: 'Überraschungsangriff', phases: ['attack'], info: 'Bei deiner nächsten Angriffsaktion gewinnt der Angreifer bei Gleichstand.' },
   abgefangen: { level: 2, name: 'Abgefangene Depesche', phases: ['reinforce', 'attack', 'fortify'], info: 'Stellt den Missionstyp eines Gegners für alle sichtbar an den Pranger.' },
+  // Nur mit General-System im Stapel (§9)
+  marschbefehl: { level: 2, needsGeneral: true, phases: ['reinforce', 'attack', 'fortify'], name: 'Marschbefehl', info: 'Versetze deinen General in ein beliebiges eigenes Gebiet – oder belebe ihn dort wieder.' },
 };
 export const depescheName = (id) => DEPESCHE_CARDS[id]?.name ?? id;
 
-function buildDepescheDecks(rng) {
+function buildDepescheDecks(rng, general) {
   const deck = { 1: [], 2: [] };
   for (const [id, c] of Object.entries(DEPESCHE_CARDS)) {
+    if (c.needsGeneral && !general) continue; // Karten ohne nutzbares System weglassen (§9)
     for (let i = 0; i < DEPESCHE_COPIES; i++) deck[c.level].push(id);
   }
   return { 1: shuffle(deck[1], rng), 2: shuffle(deck[2], rng) };
@@ -133,9 +139,13 @@ function drawDepescheFor(s, pid, level, rng) {
   return card;
 }
 
-// Belohnungswahl auslösen: 2 Karten ziehen, in die Warteschlange des Spielers legen.
-function grantDepescheChoice(s, pid, level, rng) {
-  const cards = [drawDepescheFor(s, pid, level, rng), drawDepescheFor(s, pid, level, rng)].filter(Boolean);
+// Belohnungswahl auslösen: `count` Karten ziehen (Standard 2), in die Warteschlange legen.
+function grantDepescheChoice(s, pid, level, rng, count = 2) {
+  const cards = [];
+  for (let i = 0; i < count; i++) {
+    const c = drawDepescheFor(s, pid, level, rng);
+    if (c) cards.push(c);
+  }
   if (!cards.length) return;
   const p = playerById(s, pid);
   (p.depeschenChoice ||= []).push({ level, cards });
@@ -326,7 +336,12 @@ function stage2Met(s, pid) {
   if (id in KONTINENT_MISSIONS) return KONTINENT_MISSIONS[id].some((c) => continentComplete(s, pid, c));
   if (id === 'g_weltmacht') return countTerritories(s, pid) >= scaled(T.g_weltmacht.stage2, n);
   if (id === 'g_bollwerk') return countTerritoriesWithTroops(s, pid, T.g_bollwerk.minTroops) >= scaled(T.g_bollwerk.stage2, n);
-  if (m.target) return (playerById(s, m.target)?.alive) && countTerritories(s, m.target) <= T.vernichtung.stage2MaxTerritories;
+  if (m.target) {
+    // §4.3: General von X durch dich besiegt 🔗 ODER X auf ≤ 4 Gebiete gedrückt
+    const killedGeneral = playerById(s, pid)?.stats?.killedGeneralOf?.includes(m.target);
+    const lowTerr = playerById(s, m.target)?.alive && countTerritories(s, m.target) <= T.vernichtung.stage2MaxTerritories;
+    return !!(killedGeneral || lowTerr);
+  }
   if (id === 'f_feldherr') return completedContinents(s, pid).length >= T.feldherr.stage2Continents;
   return false;
 }
@@ -338,7 +353,8 @@ function reachStage(s, pid, idx, rng = Math.random) {
   p.stagesDone[idx] = true;
   p.stageBonus += MISSION_STAGE_BONUS;
   const level = idx === 0 ? 1 : 2; // Etappe 1 -> Stufe I, Etappe 2 -> Stufe II
-  grantDepescheChoice(s, pid, level, rng);
+  // Etappe 2 stellt 3 Karten zur Wahl (mehr Reaktionsmöglichkeiten, z. B. Marschbefehl bei totem General)
+  grantDepescheChoice(s, pid, level, rng, idx === 1 ? 3 : 2);
   addLog(s, `${p.name} hat eine Etappe erreicht (+${MISSION_STAGE_BONUS} Truppen, 1 Depesche).`); // welche bleibt geheim
 }
 
@@ -358,8 +374,11 @@ function checkStage1(s, pid, rng) {
     ok = ts.conquered >= MISSION_TARGETS.g_weltmacht.stage1Conquests;
   } else if (m.target) {
     ok = (ts.conqueredFrom[m.target] || 0) >= MISSION_TARGETS.vernichtung.stage1From;
+  } else if (id === 'f_feldherr') {
+    // Kumulativ über Züge: General war an genug Eroberungen beteiligt (§4.4)
+    ok = (p.stats?.generalConquests || 0) >= MISSION_TARGETS.feldherr.stage1GeneralConquests;
   }
-  // g_bollwerk (Abwehr) und f_feldherr (General) sind keine Eroberungs-Ereignisse → hier nichts
+  // g_bollwerk (Abwehr) ist kein Eroberungs-Ereignis → wird zu Zugbeginn geprüft
   if (ok) reachStage(s, pid, 0, rng);
 }
 
@@ -525,6 +544,7 @@ export function createGame(players, rng = Math.random, options = {}) {
     setsRedeemed: 0, // global, steuert die dynamische Staffelung
     lastCombat: null,
     turnMoves: [], // Pfeil-Historie des laufenden Zugs (wird in startTurn geleert)
+    attacksThisTurn: 0, // Angriffe im laufenden Zug (Limit in der ersten Runde)
     winner: null,
     log: [],
   };
@@ -551,12 +571,12 @@ export function createGame(players, rng = Math.random, options = {}) {
       p.mission = null;
       p.stagesDone = [false, false]; // [Etappe 1, Etappe 2]
       p.stageBonus = 0; // +2 je erreichter Etappe, fließt in die nächste Verstärkung
-      p.stats = { defendedSinceOwnTurn: 0 }; // Bollwerk-Zähler (dauerhaft)
+      p.stats = { defendedSinceOwnTurn: 0, generalConquests: 0, killedGeneralOf: [] }; // dauerhafte Zähler (§5.2)
       p.depeschen = []; // Hand (max. DEPESCHE_HAND_LIMIT)
       p.depeschenChoice = []; // offene Belohnungs-Wahlen (Warteschlange)
       p.pillory = null; // öffentlicher Missionstyp, sobald enttarnt (§6.4)
     }
-    state.depeschenDeck = buildDepescheDecks(rng);
+    state.depeschenDeck = buildDepescheDecks(rng, state.general);
     state.depeschenDiscard = { 1: [], 2: [] };
     state.depeschePlayedThisTurn = false;
     state.tieBreakAttacker = null; // Überraschungsangriff: Gleichstand geht an diesen Angreifer
@@ -591,6 +611,7 @@ function startTurn(s, rng = Math.random) {
   // Zähler für diesen Zug zurücksetzen
   s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
   s.turnMoves = []; // Pfeil-Historie dieses Zugs (Angriffe/Verschiebungen), für alle sichtbar
+  s.attacksThisTurn = 0; // für das Angriffslimit der ersten Runde
   s.depeschePlayedThisTurn = false;
   s.tieBreakAttacker = null;
   if (s.missions) {
@@ -656,9 +677,15 @@ function forceSkip(s, rng = Math.random) {
 
 // ---------------------------------------------------------------- Kampf
 
+// Erste Runde = jeder spielt zum ersten Mal, also Zug 1..Spieleranzahl.
+function firstRoundAttackLimited(s) {
+  return s.turn <= s.order.length && (s.attacksThisTurn || 0) >= FIRST_ROUND_ATTACK_LIMIT;
+}
+
 function checkAttack(s, fromId, toId, pid) {
   if (s.phase !== 'attack') return 'Angreifen ist gerade nicht möglich.';
   if (s.pendingMove) return 'Lege zuerst fest, wie viele Truppen nachrücken.';
+  if (firstRoundAttackLimited(s)) return `In der ersten Runde sind höchstens ${FIRST_ROUND_ATTACK_LIMIT} Angriffe erlaubt.`;
   const from = s.territories[fromId];
   const to = s.territories[toId];
   if (!from || !to) return 'Unbekanntes Gebiet.';
@@ -715,14 +742,21 @@ function conquer(s, fromId, toId, dice, pid, rng = Math.random) {
   if (s.lastCombat) s.lastCombat.conquered = true;
   addLog(s, `${playerName(s, pid)} erobert ${territoryName(toId)}!`);
 
-  // General des bisherigen Besitzers fällt, wenn sein Gebiet erobert wird (§General).
   if (s.general) {
+    const attacker = playerById(s, pid);
+    // Feldherr: General stand im angreifenden Gebiet, als die Eroberung passierte (§4.4)
+    if (generalOn(s, pid, fromId) && attacker?.stats) attacker.stats.generalConquests = (attacker.stats.generalConquests || 0) + 1;
+    // General des bisherigen Besitzers fällt, wenn sein Gebiet erobert wird
     const victim = playerById(s, prevOwner);
     if (victim?.general === toId) {
       victim.general = null;
-      const att = playerById(s, pid);
-      if (att?.stats) (att.stats.killedGeneralOf ||= []).push(prevOwner); // für Vernichtung-Etappe 2 (Schritt 7)
+      if (attacker?.stats) (attacker.stats.killedGeneralOf ||= []).push(prevOwner); // Vernichtung-Etappe 2 (§4.3)
       addLog(s, `⚔️ ${playerName(s, pid)} hat den General von ${victim.name} besiegt!`);
+      // Belohnung: eine Stufe-I-Depesche (nur wenn Depeschen aktiv sind, §6.3)
+      if (s.missions) {
+        grantDepescheChoice(s, pid, 1, rng);
+        addLog(s, 'Für den besiegten General erhältst du eine Depesche (Stufe I).', [pid]);
+      }
     }
   }
 
@@ -767,8 +801,17 @@ function conquer(s, fromId, toId, dice, pid, rng = Math.random) {
 function playDepescheEffect(s, id, a, pid) {
   const own = (tid) => s.territories[tid] && s.territories[tid].owner === pid;
   if (id === 'nachschub') {
+    // Mit lebendem General gehen die +3 auf dessen Gebiet (§6.3), sonst auf ein beliebiges eigenes.
+    const gen = s.general ? playerById(s, pid)?.general : null;
+    const target = gen || a.target;
+    if (!own(target)) return 'Wähle ein eigenes Gebiet.';
+    s.territories[target].troops += 3;
+    return null;
+  }
+  if (id === 'marschbefehl') {
+    if (!s.general) return 'Der Marschbefehl ist ohne General-System wirkungslos.';
     if (!own(a.target)) return 'Wähle ein eigenes Gebiet.';
-    s.territories[a.target].troops += 3;
+    playerById(s, pid).general = a.target; // versetzen oder (falls gefallen) wiederbeleben
     return null;
   }
   if (id === 'sabotage') {
@@ -811,9 +854,10 @@ function chooseDepesche(s, pid, keep, discardIdx) {
   const p = playerById(s, pid);
   const choice = p?.depeschenChoice?.[0];
   if (!choice) return 'Du hast gerade keine Depeschen-Wahl offen.';
-  const kept = keep === 'a' ? choice.cards[0] : keep === 'b' ? choice.cards[1] : null;
-  if (keep != null && keep !== 'a' && keep !== 'b') return 'Ungültige Wahl.';
-  if ((keep === 'a' && !choice.cards[0]) || (keep === 'b' && !choice.cards[1])) return 'Diese Karte gibt es nicht.';
+  const keepIdx = keep == null ? -1 : { a: 0, b: 1, c: 2 }[keep];
+  if (keepIdx === undefined) return 'Ungültige Wahl.';
+  if (keepIdx >= 0 && !choice.cards[keepIdx]) return 'Diese Karte gibt es nicht.';
+  const kept = keepIdx >= 0 ? choice.cards[keepIdx] : null;
   if (kept) {
     if (p.depeschen.length >= DEPESCHE_HAND_LIMIT) {
       const di = toInt(discardIdx);
@@ -823,8 +867,8 @@ function chooseDepesche(s, pid, keep, discardIdx) {
     }
     p.depeschen.push(kept);
   }
-  // nicht behaltene (gezogene) Karten wandern auf die Ablage
-  for (const c of choice.cards) if (c !== kept) s.depeschenDiscard[DEPESCHE_CARDS[c].level].push(c);
+  // nicht behaltene (gezogene) Karten wandern auf die Ablage – per Index, damit Duplikate stimmen
+  choice.cards.forEach((c, i) => { if (i !== keepIdx) s.depeschenDiscard[DEPESCHE_CARDS[c].level].push(c); });
   p.depeschenChoice.shift();
   addLog(s, kept ? `Du behältst eine Depesche: ${depescheName(kept)}.` : 'Du verwirfst die gezogenen Depeschen.', [pid]);
   return null;
@@ -903,6 +947,7 @@ const HANDLERS = {
   attack(s, a, pid, rng) {
     const err = checkAttack(s, a.from, a.to, pid);
     if (err) return err;
+    s.attacksThisTurn = (s.attacksThisTurn || 0) + 1;
     const from = s.territories[a.from];
     const maxDice = Math.min(3, from.troops - 1);
     const dice = a.dice == null ? maxDice : toInt(a.dice);
@@ -932,6 +977,7 @@ const HANDLERS = {
   blitz(s, a, pid, rng) {
     const err = checkAttack(s, a.from, a.to, pid);
     if (err) return err;
+    s.attacksThisTurn = (s.attacksThisTurn || 0) + 1;
     const from = s.territories[a.from];
     const to = s.territories[a.to];
     const defender = to.owner;

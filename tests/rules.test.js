@@ -7,7 +7,7 @@ import {
   validAttackTargets, reachableOwn, START_ARMIES, SETUP_BATCH, MAX_PLAYERS,
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
   missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
-  DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, missionType, PILLORY_LABEL,
+  DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, missionType, PILLORY_LABEL, FIRST_ROUND_ATTACK_LIMIT,
 } from '../js/rules.js';
 import { missionBotAction } from './bots.js';
 
@@ -765,6 +765,9 @@ test('General: fällt, wenn sein Gebiet erobert wird (+ killedGeneralOf)', () =>
   assert.ifError(r.error);
   assert.equal(r.state.players.find((p) => p.id === other).general, null, 'General ist gefallen');
   assert.ok(r.state.players.find((p) => p.id === pid).stats.killedGeneralOf.includes(other));
+  // Belohnung fürs Besiegen eines Generals: eine Stufe-I-Depeschen-Wahl (§6.3)
+  const reward = r.state.players.find((p) => p.id === pid).depeschenChoice.at(-1);
+  assert.equal(reward.level, 1, 'Stufe-I-Depesche als Belohnung');
 });
 
 test('General: rückt bei occupy/fortify nur auf Wunsch mit', () => {
@@ -785,6 +788,148 @@ test('General: rückt bei occupy/fortify nur auf Wunsch mit', () => {
   s.players.find((p) => p.id === pid).general = from;
   r = applyAction(s, { type: 'occupy', count: 2 }, pid);
   assert.equal(r.state.players.find((p) => p.id === pid).general, from, 'General bleibt ohne Flag');
+});
+
+// ------------------------------------------------------------------ General-Anbindung (Schritt 7)
+
+test('Feldherr: Etappe 1 nach 3 Eroberungen mit dem General', () => {
+  const s = createGame(players(3), seeded(700), { general: true, missions: true });
+  const pid = currentPlayerId(s);
+  setMission(s, pid, { id: 'f_feldherr' });
+  const other = s.order.find((id) => id !== pid);
+  const third = s.order.find((id) => id !== pid && id !== other);
+  const hub = 'ontario';
+  const neigh = ADJACENCY[hub].slice(0, 3);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: pid, troops: 2 };
+  s.territories[hub] = { owner: pid, troops: 30 };
+  for (const t of neigh) s.territories[t] = { owner: other, troops: 1 };
+  // ein paar Gebiete bleiben beim dritten Spieler, damit kein Komplett-Sieg eintritt
+  Object.keys(s.territories).filter((t) => t !== hub && !neigh.includes(t)).slice(0, 5)
+    .forEach((t) => { s.territories[t] = { owner: third, troops: 1 }; });
+  const p0 = s.players.find((x) => x.id === pid);
+  p0.general = hub;
+  p0.stats = { defendedSinceOwnTurn: 0, generalConquests: 0, killedGeneralOf: [] };
+  s.phase = 'attack'; s.current = s.order.indexOf(pid); s.pendingMove = null;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  let st = s;
+  for (const t of neigh) {
+    st = applyAction(st, { type: 'blitz', from: hub, to: t }, pid, diceSeq([6, 1])).state;
+    if (st.pendingMove) st = applyAction(st, { type: 'occupy', count: st.pendingMove.min }, pid).state; // General bleibt auf hub
+  }
+  const p = st.players.find((x) => x.id === pid);
+  assert.ok(p.stats.generalConquests >= 3, 'General an 3 Eroberungen beteiligt');
+  assert.equal(p.stagesDone[0], true, 'Feldherr-Etappe 1 erreicht');
+});
+
+test('Vernichtung: Etappe 2 auch durch besiegten General', () => {
+  const s = createGame(players(3), seeded(701), { general: true, missions: true });
+  const pid = currentPlayerId(s);
+  const x = s.order.find((id) => id !== pid);
+  setMission(s, pid, { id: `v_${x}`, target: x });
+  const p0 = s.players.find((z) => z.id === pid);
+  p0.stats = { defendedSinceOwnTurn: 0, generalConquests: 0, killedGeneralOf: [x] };
+  // X lebt und hat weit mehr als 4 Gebiete -> nur der General-Kill kann Etappe 2 erfüllen
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: x, troops: 1 };
+  Object.keys(s.territories).slice(0, 10).forEach((t) => { s.territories[t] = { owner: pid, troops: 1 }; });
+  s.phase = 'fortify'; s.current = s.order.indexOf(pid); s.pendingMove = null; s.conqueredThisTurn = false;
+  const r = applyAction(s, { type: 'endTurn' }, pid, seeded(2));
+  assert.ifError(r.error);
+  assert.equal(r.state.players.find((z) => z.id === pid).stagesDone[1], true, 'Etappe 2 durch General-Kill');
+});
+
+test('Marschbefehl: versetzt den General bzw. belebt ihn wieder', () => {
+  const s = createGame(players(3), seeded(702), { general: true, missions: true });
+  const pid = currentPlayerId(s);
+  const own = Object.keys(s.territories).filter((t) => s.territories[t].owner === pid);
+  s.players.find((p) => p.id === pid).general = null; // gefallen
+  giveDepesche(s, pid, 'marschbefehl', 'attack');
+  const r = applyAction(s, { type: 'playDepesche', index: 0, target: own[0] }, pid);
+  assert.ifError(r.error);
+  assert.equal(r.state.players.find((p) => p.id === pid).general, own[0], 'auf eigenem Gebiet wiederbelebt');
+  // auf fremdes Gebiet nicht erlaubt
+  const foeT = Object.keys(s.territories).find((t) => s.territories[t].owner !== pid);
+  giveDepesche(s, pid, 'marschbefehl', 'attack');
+  assert.ok(applyAction(s, { type: 'playDepesche', index: 0, target: foeT }, pid).error);
+});
+
+test('Nachschub mit General landet auf dem General-Gebiet', () => {
+  const s = createGame(players(3), seeded(703), { general: true, missions: true });
+  const pid = currentPlayerId(s);
+  const own = Object.keys(s.territories).filter((t) => s.territories[t].owner === pid);
+  const genT = own[0]; const otherOwn = own[1];
+  s.players.find((p) => p.id === pid).general = genT;
+  const before = s.territories[genT].troops;
+  giveDepesche(s, pid, 'nachschub', 'reinforce');
+  // Ziel bewusst woanders -> wird ignoriert, +3 geht auf das General-Gebiet
+  const r = applyAction(s, { type: 'playDepesche', index: 0, target: otherOwn }, pid);
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[genT].troops, before + 3);
+});
+
+test('Marschbefehl liegt nur mit General-System im Stapel', () => {
+  const withG = createGame(players(3), seeded(706), { missions: true, general: true });
+  assert.equal(withG.depeschenDeck[2].includes('marschbefehl'), true);
+  const noG = createGame(players(3), seeded(706), { missions: true });
+  assert.equal(noG.depeschenDeck[2].includes('marschbefehl'), false);
+});
+
+test('Etappe 2 stellt drei Depeschen zur Auswahl', () => {
+  const s = createGame(players(3), seeded(704), { missions: true });
+  const pid = currentPlayerId(s);
+  setMission(s, pid, { id: 'g_weltmacht' });
+  const others = s.order.filter((id) => id !== pid);
+  Object.keys(s.territories).forEach((t, i) => { s.territories[t] = { owner: i < 22 ? pid : others[i % others.length], troops: 1 }; });
+  s.phase = 'fortify'; s.current = s.order.indexOf(pid); s.pendingMove = null; s.conqueredThisTurn = false;
+  const r = applyAction(s, { type: 'endTurn' }, pid, seeded(9));
+  const me = r.state.players.find((x) => x.id === pid);
+  assert.equal(me.stagesDone[1], true);
+  assert.equal(me.depeschenChoice[0].cards.length, 3, 'Etappe 2 -> 3 Karten zur Wahl');
+});
+
+test('chooseDepesche: dritte Karte (c) behalten, Duplikate korrekt abgelegt', () => {
+  const s = createGame(players(3), seeded(705), { missions: true });
+  const me = s.order[1];
+  s.players.find((x) => x.id === me).depeschen = [];
+  s.players.find((x) => x.id === me).depeschenChoice = [{ level: 2, cards: ['sabotage', 'sabotage', 'ueberraschung'] }];
+  const r = applyAction(s, { type: 'chooseDepesche', keep: 'c' }, me);
+  assert.ifError(r.error);
+  assert.deepEqual(r.state.players.find((x) => x.id === me).depeschen, ['ueberraschung']);
+  // beide nicht gewählten (identischen) Karten landen auf der Ablage
+  assert.equal(r.state.depeschenDiscard[2].filter((c) => c === 'sabotage').length, 2);
+});
+
+// ------------------------------------------------------------------ Angriffslimit erste Runde
+
+test('Erste Runde: höchstens 3 Angriffe, danach erst ab Runde 2 wieder frei', () => {
+  const s = createGame(players(3), seeded(800), {});
+  const pid = currentPlayerId(s);
+  const other = s.order.find((id) => id !== pid);
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+  const hub = 'ontario';
+  const neigh = ADJACENCY[hub];
+  s.territories[hub] = { owner: pid, troops: 40 };
+  for (const t of neigh) s.territories[t] = { owner: other, troops: 1 };
+  // einem Dritten Gebiete lassen, damit kein Komplett-Sieg eintritt
+  const third = s.order.find((id) => id !== pid && id !== other);
+  Object.keys(s.territories).filter((t) => t !== hub && !neigh.includes(t)).slice(0, 6)
+    .forEach((t) => { s.territories[t] = { owner: third, troops: 1 }; });
+  s.phase = 'attack'; s.current = s.order.indexOf(pid); s.turn = 1; s.pendingMove = null;
+  s.attacksThisTurn = 0; s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  let st = s;
+  // 3 Angriffe sind erlaubt
+  for (let i = 0; i < FIRST_ROUND_ATTACK_LIMIT; i++) {
+    const r = applyAction(st, { type: 'attack', from: hub, to: neigh[i], dice: 1 }, pid, diceSeq([6, 1]));
+    assert.ifError(r.error);
+    st = r.state;
+    if (st.pendingMove) st = applyAction(st, { type: 'occupy', count: st.pendingMove.min }, pid).state;
+  }
+  // der 4. wird abgelehnt
+  const blocked = applyAction(st, { type: 'attack', from: hub, to: neigh[3], dice: 1 }, pid, diceSeq([6, 1]));
+  assert.match(blocked.error, /erste(n)? Runde/);
+  // ab Runde 2 (turn > Spielerzahl) wieder frei
+  st.turn = s.order.length + 1; st.attacksThisTurn = 0;
+  const ok = applyAction(st, { type: 'attack', from: hub, to: neigh[3], dice: 1 }, pid, diceSeq([6, 1]));
+  assert.ifError(ok.error);
 });
 
 // ------------------------------------------------------------------ Zug-Historie (Pfeile)
@@ -819,7 +964,7 @@ test('Missions-Bot: Partien enden, Siege sind gültig und Missionen sind erreich
   for (let g = 0; g < 24; g++) {
     const rng = seeded(4000 + g);
     const n = 3 + (g % 5); // 3..7 Spieler
-    let s = createGame(players(n), rng, { missions: true, ordenMode: g % 2 ? 'dynamic' : 'static' });
+    let s = createGame(players(n), rng, { missions: true, general: true, ordenMode: g % 2 ? 'dynamic' : 'static' });
     let steps = 0;
     for (; steps < 60000 && s.phase !== 'gameover'; steps++) {
       const action = missionBotAction(s, rng);
@@ -892,6 +1037,7 @@ function botAction(s, rng) {
     }
     case 'attack': {
       if (s.pendingMove) return { type: 'occupy', count: s.pendingMove.max };
+      if (s.turn <= s.order.length && (s.attacksThisTurn || 0) >= FIRST_ROUND_ATTACK_LIMIT) return { type: 'endAttack' };
       const options = [];
       for (const f of own) {
         for (const t of validAttackTargets(s, f)) {

@@ -1,6 +1,7 @@
 # Spezifikation: General-System
 
-Stand: 06.11.2026 · Status: **Kern umgesetzt**; 🔗-Missions/Depeschen-Anbindung = Schritt 7.
+Stand: 06.11.2026 · Status: **Kern + Schritt 7 umgesetzt** (Feldherr, Marschbefehl,
+Nachschub-auf-General, Vernichtung-Etappe 2, General-Kill-Belohnung).
 
 Optionales Zusatzsystem (Lobby-/Lokal-Schalter „General"), unabhängig von den Missionen
 aktivierbar. In `createGame(players, rng, { general: true })` gesetzt als `state.general`.
@@ -32,16 +33,22 @@ aktivierbar. In `createGame(players, rng, { general: true })` gesetzt als `state
   wenn der eigene General auf dem Startgebiet steht.
 - Kampf-Panel: **★+1** neben der betroffenen Seite und Hinweis „General: +1 auf höchsten Würfel".
 
-## 3. Abhängige Teile (Schritt 7, 🔗 – noch offen)
+## 3. Missions-/Depeschen-Anbindung (Schritt 7 – umgesetzt)
 
-Diese Haken existieren schon im Code, werden aber erst in Schritt 7 scharf geschaltet:
-
-- **Feldherr-Mission** (`f_feldherr`) in den Pool (`options.general`), Etappe 1 =
-  `generalConquests ≥ 3` (General stand im angreifenden Gebiet bei der Eroberung).
-- **Vernichtung Etappe 2**: „General von X durch dich besiegt" nutzt `stats.killedGeneralOf`.
-- Depesche **Marschbefehl**: General springt in ein eigenes Gebiet bzw. wird wiederbelebt.
-- Depesche **Nachschub**: mit General → +3 auf das Gebiet des Generals (statt beliebig).
-- **General-Kill → Stufe-I-Depesche** als Belohnung.
+- **Feldherr-Mission** (`f_feldherr`) im Pool, sobald `options.general`. Etappe 1 =
+  `stats.generalConquests ≥ 3` (General stand im angreifenden Gebiet bei der Eroberung),
+  kumulativ über Züge, nach jeder Eroberung geprüft. Fällt der General vor 3, ist Etappe 1
+  unerreichbar – gewollt.
+- **Vernichtung Etappe 2**: erfüllt durch „General von X durch dich besiegt"
+  (`stats.killedGeneralOf`) **oder** X auf ≤ 4 Gebiete gedrückt.
+- Depesche **Marschbefehl** (Stufe II, nur mit General im Stapel): setzt den General in ein
+  beliebiges eigenes Gebiet – lebt er, zieht er um; ist er gefallen, wird er dort wiederbelebt
+  (einziger Weg der Wiederbelebung).
+- Depesche **Nachschub**: mit lebendem General gehen die +3 auf dessen Gebiet; ohne General
+  (System aus oder gefallen) auf ein beliebiges eigenes.
+- **General-Kill → Stufe-I-Depeschenwahl** als Belohnung (nur bei aktiven Missionen).
+- **Etappe 2** stellt **3** Depeschen zur Wahl (statt 2), um z. B. bei totem General gezielt
+  Marschbefehl ziehen zu können.
 
 ## 4. Tests (umgesetzt)
 

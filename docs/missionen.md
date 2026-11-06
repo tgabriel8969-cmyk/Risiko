@@ -2,9 +2,10 @@
 
 Stand: 05.11.2026 · Status: **Schritte 1–6 umgesetzt** (Sichtbarkeit, Missions-Pool,
 Etappen, Depeschen inkl. UI, Pranger, Missions-Bot + Balance-Messung via
-`npm run balance`). General-**Kern** gebaut (siehe `docs/general.md`). Offen: 7 🔗 General-Anbindung
-(Feldherr, Marschbefehl, Vernichtung-Etappe 2, General-Kill-Belohnung) · 8 🔗 Nebel. Balance-Nachjustierung bei Bedarf
-(aktuell auffällig: Bollwerk-Siegquote ~0 %, Weltmacht fällt mit steigender Spielerzahl).
+`npm run balance`). General-Kern + Schritt 7 (Feldherr, Marschbefehl, Nachschub-auf-General,
+Vernichtung-Etappe 2, General-Kill-Belohnung) gebaut – siehe `docs/general.md`. Etappe 2
+stellt 3 Depeschen zur Wahl. Offen: 8 🔗 Nebel. Balance-Nachjustierung bei Bedarf
+(aktuell auffällig: Bollwerk-Siegquote ~0 %, Weltmacht/Feldherr fallen mit steigender Spielerzahl).
 
 Diese Datei ist der Auftrag für die Umsetzung. Sie baut auf dem aktuellen Code auf
 (`js/rules.js` mit Orden, `createGame(players, rng, options)`, `HANDLERS`).

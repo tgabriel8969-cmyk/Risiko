@@ -5,7 +5,7 @@
 import { ADJACENCY, CONTINENT_TERRITORIES } from '../js/map.js';
 import {
   currentPlayerId, validAttackTargets, reachableOwn, ordenSets,
-  missionTargets, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT,
+  missionTargets, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, FIRST_ROUND_ATTACK_LIMIT,
 } from '../js/rules.js';
 
 export function missionBotAction(s, rng) {
@@ -60,6 +60,12 @@ export function missionBotAction(s, rng) {
         const foes = s.players.filter((p) => p.id !== pid && p.alive && !p.pillory);
         if (foes.length) return { type: 'playDepesche', index: i, target: pick(foes).id };
       }
+      if (id === 'marschbefehl') {
+        // General an die Front (oder, falls gefallen, dort wiederbeleben)
+        const frontier = own.filter((t) => ADJACENCY[t].some(foe));
+        const where = frontier.length ? frontier : own;
+        if (where.length) return { type: 'playDepesche', index: i, target: pick(where) };
+      }
     }
   }
 
@@ -77,6 +83,8 @@ export function missionBotAction(s, rng) {
     }
     case 'attack': {
       if (s.pendingMove) return { type: 'occupy', count: s.pendingMove.max };
+      // Angriffslimit der ersten Runde beachten
+      if (s.turn <= s.order.length && (s.attacksThisTurn || 0) >= FIRST_ROUND_ATTACK_LIMIT) return { type: 'endAttack' };
       const options = [];
       for (const f of own) {
         if (s.territories[f].troops < 2) continue;
