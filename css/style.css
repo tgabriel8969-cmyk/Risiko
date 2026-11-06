@@ -287,6 +287,9 @@ input, select {
 .gen-toggle.on { border-color: var(--accent); color: var(--accent); }
 .gen-badge { color: var(--accent); font-weight: 700; font-size: .78rem; }
 
+/* Nebel: verborgene Truppenzahl als gedämpftes „?" */
+.troops.fog { opacity: .75; font-weight: 700; }
+
 /* Orden-Ablage unter der Karte (persönlich, eingelassen) */
 /* Orden- und Depeschen-Ablage nebeneinander unter der Karte (schmälert die Karte nicht) */
 .trays { display: flex; gap: 10px; width: 100%; justify-content: center; align-items: stretch; flex-wrap: wrap; }

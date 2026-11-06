@@ -5,7 +5,7 @@
 import { ADJACENCY, CONTINENT_TERRITORIES } from '../js/map.js';
 import {
   currentPlayerId, validAttackTargets, reachableOwn, ordenSets,
-  missionTargets, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, FIRST_ROUND_ATTACK_LIMIT,
+  missionTargets, DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, FIRST_ROUND_ATTACK_LIMIT, visibleTerritories,
 } from '../js/rules.js';
 
 export function missionBotAction(s, rng) {
@@ -43,7 +43,8 @@ export function missionBotAction(s, rng) {
         return { type: 'playDepesche', index: i, target: pick(border.length ? border : own) };
       }
       if (id === 'sabotage') {
-        const foes = Object.keys(s.territories).filter(foe);
+        let foes = Object.keys(s.territories).filter(foe);
+        if (s.fog) { const vis = visibleTerritories(s, pid); foes = foes.filter((t) => vis.has(t)); } // nur sichtbare Ziele
         const pref = foes.filter(advances);
         if (foes.length) return { type: 'playDepesche', index: i, target: pick(pref.length ? pref : foes) };
       }
@@ -66,6 +67,9 @@ export function missionBotAction(s, rng) {
         const where = frontier.length ? frontier : own;
         if (where.length) return { type: 'playDepesche', index: i, target: pick(where) };
       }
+      if (id === 'aufklaerung') return { type: 'playDepesche', index: i };
+      if (id === 'spaeher') return { type: 'playDepesche', index: i, target: pick(Object.keys(s.territories)) };
+      if (id === 'tarnung' && own.length >= 3) return { type: 'playDepesche', index: i, targets: own.slice(0, 3) };
     }
   }
 

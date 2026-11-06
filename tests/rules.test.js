@@ -8,6 +8,7 @@ import {
   ordenSets, ordenReward, ORDEN_STATIC_BONUS, ORDEN_FORCE_AT, viewFor,
   missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
   DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, missionType, PILLORY_LABEL, FIRST_ROUND_ATTACK_LIMIT,
+  visibleTerritories,
 } from '../js/rules.js';
 import { missionBotAction } from './bots.js';
 
@@ -898,6 +899,93 @@ test('chooseDepesche: dritte Karte (c) behalten, Duplikate korrekt abgelegt', ()
   assert.equal(r.state.depeschenDiscard[2].filter((c) => c === 'sabotage').length, 2);
 });
 
+// ------------------------------------------------------------------ Nebel des Krieges (Schritt 8)
+
+test('Nebel: eigene + angrenzende Gebiete sichtbar, Rest verborgen (viewFor)', () => {
+  const s = createGame(players(3), seeded(900), { fog: true });
+  const pid = s.order[0];
+  const others = s.order.slice(1);
+  Object.keys(s.territories).forEach((t, i) => { s.territories[t] = { owner: others[i % others.length], troops: 3 }; });
+  s.territories['ontario'] = { owner: pid, troops: 5 };
+  const vis = visibleTerritories(s, pid);
+  assert.ok(vis.has('ontario'));
+  for (const n of ADJACENCY['ontario']) assert.ok(vis.has(n), `${n} als Nachbar sichtbar`);
+  const far = Object.keys(s.territories).find((t) => t !== 'ontario' && !ADJACENCY['ontario'].includes(t));
+  assert.ok(!vis.has(far), 'entferntes Gebiet verborgen');
+  const v = viewFor(s, pid);
+  assert.equal(v.territories[far].troops, null, 'Truppen verborgen');
+  assert.ok(v.territories[far].owner, 'Besitzer bleibt sichtbar');
+  assert.equal(v.territories['ontario'].troops, 5, 'eigenes Gebiet sichtbar');
+});
+
+test('Nebel: ohne Option ist alles sichtbar', () => {
+  const s = createGame(players(3), seeded(900), {});
+  assert.equal(s.fog, false);
+  assert.equal(visibleTerritories(s, s.order[0]).size, Object.keys(s.territories).length);
+});
+
+test('Nebel: Aufklärung hebt diesen Zug den Nebel ganz auf', () => {
+  const s = createGame(players(3), seeded(901), { fog: true, missions: true });
+  const pid = currentPlayerId(s);
+  giveDepesche(s, pid, 'aufklaerung', 'reinforce');
+  const r = applyAction(s, { type: 'playDepesche', index: 0 }, pid);
+  assert.ifError(r.error);
+  assert.equal(visibleTerritories(r.state, pid).size, Object.keys(r.state.territories).length);
+});
+
+test('Nebel: Späher deckt ein entferntes Gebiet samt Nachbarn auf', () => {
+  const s = createGame(players(3), seeded(905), { fog: true, missions: true });
+  const pid = currentPlayerId(s);
+  const others = s.order.slice(1);
+  Object.keys(s.territories).forEach((t, i) => { s.territories[t] = { owner: others[i % others.length], troops: 2 }; });
+  s.territories['ontario'] = { owner: pid, troops: 4 };
+  const far = Object.keys(s.territories).find((t) => t !== 'ontario' && !ADJACENCY['ontario'].includes(t));
+  giveDepesche(s, pid, 'spaeher', 'reinforce');
+  const r = applyAction(s, { type: 'playDepesche', index: 0, target: far }, pid);
+  assert.ifError(r.error);
+  assert.ok(visibleTerritories(r.state, pid).has(far), 'Späher-Ziel sichtbar');
+});
+
+test('Nebel: Tarnung verbirgt 3 eigene Gebiete trotz Angrenzung vor Gegnern', () => {
+  const s = createGame(players(3), seeded(902), { fog: true, missions: true });
+  const a = s.order[0]; const b = s.order[1];
+  Object.keys(s.territories).forEach((t) => { s.territories[t] = { owner: a, troops: 2 }; });
+  const far = Object.keys(s.territories).filter((t) => t !== 'ontario' && !ADJACENCY['ontario'].includes(t));
+  const bTiles = ['ontario', far[0], far[1]];
+  bTiles.forEach((t) => { s.territories[t] = { owner: b, troops: 9 }; });
+  assert.ok(visibleTerritories(s, a).has('ontario'), 'a sieht ontario normal (angrenzend)');
+  giveDepesche(s, b, 'tarnung', 'reinforce');
+  const r = applyAction(s, { type: 'playDepesche', index: 0, targets: bTiles }, b);
+  assert.ifError(r.error);
+  assert.ok(!visibleTerritories(r.state, a).has('ontario'), 'getarnt -> für a verborgen');
+  assert.ok(visibleTerritories(r.state, b).has('ontario'), 'eigenes bleibt sichtbar');
+  // falsche Anzahl wird abgelehnt
+  giveDepesche(s, b, 'tarnung', 'reinforce');
+  assert.ok(applyAction(s, { type: 'playDepesche', index: 0, targets: ['ontario'] }, b).error);
+});
+
+test('Nebel: Sabotage nur auf sichtbare Ziele', () => {
+  const s = createGame(players(3), seeded(903), { fog: true, missions: true });
+  const pid = currentPlayerId(s); const other = s.order.find((id) => id !== pid);
+  Object.keys(s.territories).forEach((t) => { s.territories[t] = { owner: other, troops: 4 }; });
+  s.territories['ontario'] = { owner: pid, troops: 3 };
+  const near = ADJACENCY['ontario'][0];
+  const far = Object.keys(s.territories).find((t) => t !== 'ontario' && !ADJACENCY['ontario'].includes(t));
+  giveDepesche(s, pid, 'sabotage', 'attack');
+  assert.match(applyAction(s, { type: 'playDepesche', index: 0, target: far }, pid).error, /sichtbare/);
+  giveDepesche(s, pid, 'sabotage', 'attack');
+  const ok = applyAction(s, { type: 'playDepesche', index: 0, target: near }, pid);
+  assert.ifError(ok.error);
+  assert.equal(ok.state.territories[near].troops, 1, 'sichtbares Ziel −3 (nie unter 1)');
+});
+
+test('Nebel-Karten liegen nur mit Nebel im Stapel', () => {
+  const withF = createGame(players(3), seeded(904), { missions: true, fog: true });
+  assert.ok(withF.depeschenDeck[1].includes('aufklaerung'));
+  const noF = createGame(players(3), seeded(904), { missions: true });
+  assert.ok(!noF.depeschenDeck[1].includes('aufklaerung'));
+});
+
 // ------------------------------------------------------------------ Angriffslimit erste Runde
 
 test('Erste Runde: höchstens 3 Angriffe, danach erst ab Runde 2 wieder frei', () => {
@@ -964,7 +1052,7 @@ test('Missions-Bot: Partien enden, Siege sind gültig und Missionen sind erreich
   for (let g = 0; g < 24; g++) {
     const rng = seeded(4000 + g);
     const n = 3 + (g % 5); // 3..7 Spieler
-    let s = createGame(players(n), rng, { missions: true, general: true, ordenMode: g % 2 ? 'dynamic' : 'static' });
+    let s = createGame(players(n), rng, { missions: true, general: true, fog: true, ordenMode: g % 2 ? 'dynamic' : 'static' });
     let steps = 0;
     for (; steps < 60000 && s.phase !== 'gameover'; steps++) {
       const action = missionBotAction(s, rng);
@@ -1008,7 +1096,8 @@ function botAction(s, rng) {
       if (id === 'ueberraschung') return { type: 'playDepesche', index: i };
       if (id === 'nachschub') return { type: 'playDepesche', index: i, target: pick(own) };
       if (id === 'sabotage') {
-        const foes = Object.keys(s.territories).filter((t) => s.territories[t].owner !== pid);
+        let foes = Object.keys(s.territories).filter((t) => s.territories[t].owner !== pid);
+        if (s.fog) { const vis = visibleTerritories(s, pid); foes = foes.filter((t) => vis.has(t)); }
         if (foes.length) return { type: 'playDepesche', index: i, target: pick(foes) };
       }
       if (id === 'gewaltmarsch' || id === 'luftbruecke') {
@@ -1075,7 +1164,7 @@ test('Simulation: 60 Zufallspartien mit 2–7 Bots verletzen keine Invarianten',
   for (let g = 0; g < 60; g++) {
     const rng = seeded(1000 + g);
     const n = 2 + (g % 6);
-    let s = createGame(players(n), rng, { ordenMode: g % 2 ? 'dynamic' : 'static', missions: g % 3 !== 0, general: g % 2 === 0 });
+    let s = createGame(players(n), rng, { ordenMode: g % 2 ? 'dynamic' : 'static', missions: g % 3 !== 0, general: g % 2 === 0, fog: g % 2 === 1 });
     for (let i = 0; i < 30000 && s.phase !== 'gameover'; i++) {
       const action = botAction(s, rng);
       const r = applyAction(s, action, currentPlayerId(s), rng);

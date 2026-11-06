@@ -50,6 +50,7 @@ const app = {
   ordenMode: 'static', // Orden-Belohnung: 'static' | 'dynamic' (vor Spielstart wählbar)
   missions: true, // Missionen (nur wirksam ab 3 Spielern)
   general: false, // General-System (+1 auf höchsten Würfel, rückt mit)
+  fog: false, // Nebel des Krieges (fremde Truppenzahlen außerhalb der Sicht verborgen)
 };
 
 // ================================================================== Start
@@ -103,6 +104,10 @@ function showStart(error = '') {
           <option value="off">General: aus</option>
           <option value="on">General: an</option>
         </select>
+        <select id="localFog" title="Nebel des Krieges">
+          <option value="off">Nebel: aus</option>
+          <option value="on">Nebel: an</option>
+        </select>
         <button class="secondary" data-act="local">Starten</button></div>
       </section>
       <p class="error">${esc(error)}</p>
@@ -130,7 +135,7 @@ function showStart(error = '') {
         if (code.length !== 6) return showStart('Bitte einen gültigen Raum-Code eingeben (4 Buchstaben + 2 Ziffern).');
         startClient(code, readName());
       }
-      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value), main.querySelector('#localOrden').value, main.querySelector('#localMissions').value === 'on', main.querySelector('#localGeneral').value === 'on');
+      if (act === 'local') startLocal(Number(main.querySelector('#localCount').value), main.querySelector('#localOrden').value, main.querySelector('#localMissions').value === 'on', main.querySelector('#localGeneral').value === 'on', main.querySelector('#localFog').value === 'on');
     } catch (err) {
       showStart(err.message);
     }
@@ -293,7 +298,7 @@ function hostStartGame() {
   const players = app.lobby.filter((p) => p.connected);
   if (players.length < MIN_PLAYERS) return;
   app.lobby = players;
-  app.state = createGame(players.map(({ id, name }) => ({ id, name })), Math.random, { ordenMode: app.ordenMode, missions: app.missions, general: app.general });
+  app.state = createGame(players.map(({ id, name }) => ({ id, name })), Math.random, { ordenMode: app.ordenMode, missions: app.missions, general: app.general, fog: app.fog });
   hostChanged();
   showGame();
 }
@@ -343,9 +348,9 @@ function clientOnMessage(msg) {
 
 // ================================================================== Lokal (Hot-Seat)
 
-function startLocal(count, ordenMode = 'static', missions = true, general = false) {
+function startLocal(count, ordenMode = 'static', missions = true, general = false, fog = false) {
   const players = Array.from({ length: count }, (_, i) => ({ id: `p${i + 1}`, name: `Spieler ${i + 1}` }));
-  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players, Math.random, { ordenMode, missions, general }) });
+  Object.assign(app, { mode: 'local', code: null, myId: null, lobby: [], state: createGame(players, Math.random, { ordenMode, missions, general, fog }) });
   showGame();
 }
 
@@ -452,6 +457,12 @@ function renderLobby() {
                  <option value="on"${app.general ? ' selected' : ''}>an (+1 auf höchsten Würfel, rückt mit)</option>
                </select>
              </label>
+             <label class="field">Nebel des Krieges
+               <select id="fogMode">
+                 <option value="off"${app.fog ? '' : ' selected'}>aus</option>
+                 <option value="on"${app.fog ? ' selected' : ''}>an (fremde Truppenzahlen verborgen)</option>
+               </select>
+             </label>
            </section>
            <button data-act="start" ${online < MIN_PLAYERS ? 'disabled' : ''}>Spiel starten</button>
            <p class="hint">Teile den Code mit deinen Freunden. Mindestens ${MIN_PLAYERS} Spieler.</p>`
@@ -465,6 +476,8 @@ function renderLobby() {
   if (missionsSel) missionsSel.addEventListener('change', (e) => { app.missions = e.target.value === 'on'; });
   const generalSel = root.querySelector('#generalMode');
   if (generalSel) generalSel.addEventListener('change', (e) => { app.general = e.target.value === 'on'; });
+  const fogSel = root.querySelector('#fogMode');
+  if (fogSel) fogSel.addEventListener('change', (e) => { app.fog = e.target.value === 'on'; });
 
   root.querySelector('main').addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-act]');

@@ -272,6 +272,8 @@ export class GameView {
     if (d.id === 'abgefangen') return new Set(); // Ziel ist ein Spieler, kein Gebiet
     const ids = Object.keys(s.territories);
     const mineT = (t) => s.territories[t].owner === me;
+    if (d.id === 'spaeher') return new Set(ids); // beliebiges Gebiet
+    if (d.id === 'tarnung') return new Set(ids.filter(mineT)); // 3 eigene Gebiete
     if (d.id === 'nachschub' || d.id === 'marschbefehl') return new Set(ids.filter(mineT));
     if (d.id === 'sabotage') return new Set(ids.filter((t) => !mineT(t)));
     if (d.need === 'from') return new Set(ids.filter((t) => mineT(t) && s.territories[t].troops >= 2));
@@ -296,6 +298,16 @@ export class GameView {
     if (d.id === 'sabotage') {
       if (t.owner === me) return this.showError('Sabotage trifft nur gegnerische Gebiete.');
       return this.playDepescheArmed({ target: id });
+    }
+    if (d.id === 'spaeher') return this.playDepescheArmed({ target: id }); // beliebiges Gebiet
+    if (d.id === 'tarnung') {
+      if (t.owner !== me) return this.showError('Du kannst nur eigene Gebiete tarnen.');
+      const i = d.tiles.indexOf(id);
+      if (i >= 0) { d.tiles.splice(i, 1); return this.render(); } // abwählen
+      if (d.tiles.length >= 3) return this.showError('Du hast schon 3 Gebiete gewählt.');
+      d.tiles.push(id);
+      if (d.tiles.length === 3) return this.playDepescheArmed({ targets: [...d.tiles] });
+      return this.render();
     }
     // gewaltmarsch / luftbruecke: erst Start, dann Ziel, dann Anzahl per Regler
     if (d.need === 'from') {
@@ -352,7 +364,8 @@ export class GameView {
         const idx = Number(data.index);
         const id = this.handCard(idx);
         if (!id) break;
-        if (id === 'ueberraschung') { this.dispatch({ type: 'playDepesche', index: idx }); break; }
+        // ohne Ziel: sofort spielen
+        if (id === 'ueberraschung' || id === 'aufklaerung') { this.dispatch({ type: 'playDepesche', index: idx }); break; }
         // Nachschub mit lebendem General: Ziel ist automatisch das Gebiet des Generals (§6.3)
         if (id === 'nachschub' && s.general) {
           const g = playerById(s, this.me())?.general;
@@ -360,8 +373,9 @@ export class GameView {
         }
         const need = id === 'abgefangen' ? 'player'
           : id === 'gewaltmarsch' || id === 'luftbruecke' ? 'from'
-          : 'target'; // nachschub, sabotage, marschbefehl: ein Gebiet anklicken
-        this.depesche = { index: idx, id, need, from: null, to: null };
+          : id === 'tarnung' ? 'tiles'
+          : 'target'; // nachschub, sabotage, marschbefehl, spaeher: ein Gebiet anklicken
+        this.depesche = { index: idx, id, need, from: null, to: null, tiles: [] };
         this.sel = { from: null, to: null }; // normale Auswahl ruhen lassen
         this.render();
         break;
@@ -1007,6 +1021,7 @@ export class GameView {
         'terr',
         clickable && 'clickable',
         this.depesche?.from === t.id && 'selected',
+        this.depesche?.tiles?.includes(t.id) && 'selected',
         this.sel.from === t.id && 'selected',
         this.sel.to === t.id && (s.phase === 'attack' ? 'target' : 'selected'),
         (targets.has(t.id) || reach.has(t.id) || depTargets.has(t.id)) && this.sel.to !== t.id && this.depesche?.from !== t.id && 'candidate',
@@ -1023,10 +1038,10 @@ export class GameView {
           <polygon class="land" points="${pts}" fill="${CONTINENTS[t.continent].land}"/>
           <circle class="hit" cx="${tx}" cy="${ty}" r="15" fill="rgba(0,0,0,0)"/>
           <circle class="token" cx="${tx}" cy="${ty}" r="10" fill="${owner.color}"/>
-          <text class="troops" x="${tx}" y="${ty}" fill="${textColorFor(owner.color)}">${st.troops}</text>
+          <text class="troops${st.fog ? ' fog' : ''}" x="${tx}" y="${ty}" fill="${textColorFor(owner.color)}">${st.troops == null ? '?' : st.troops}</text>
           <text class="tname" x="${tx}" y="${ty + 21}">${esc(t.name)}</text>
           ${generalAt[t.id] ? `<text class="general-star" x="${tx + 12}" y="${ty - 9}" fill="${generalAt[t.id]}">★</text>` : ''}
-          <title>${esc(t.name)} – ${esc(owner.name)}, ${st.troops} Truppe(n)${generalAt[t.id] ? ' · General' : ''}</title>
+          <title>${esc(t.name)} – ${esc(owner.name)}, ${st.troops == null ? 'Truppen im Nebel verborgen' : `${st.troops} Truppe(n)`}${generalAt[t.id] ? ' · General' : ''}</title>
         </g>`;
     }
 
@@ -1105,6 +1120,14 @@ export class GameView {
     if (d.id === 'marschbefehl') {
       const alive = playerById(s, this.me())?.general != null;
       return `${head}<p>Klicke das eigene Gebiet, in das dein General ${alive ? 'ziehen' : 'wiederbelebt werden'} soll.</p><div class="row">${cancel}</div>`;
+    }
+    if (d.id === 'spaeher') {
+      return `${head}<p>Klicke ein beliebiges Gebiet – es wird samt Nachbarn bis zu deinem nächsten Zug sichtbar.</p><div class="row">${cancel}</div>`;
+    }
+    if (d.id === 'tarnung') {
+      const chosen = d.tiles.map((t) => esc(territoryName(t))).join(', ') || '—';
+      return `${head}<p>Wähle <strong>3 eigene Gebiete</strong>, die Gegnern „?" zeigen (${d.tiles.length}/3).</p>
+              <p class="small muted">Gewählt: ${chosen}</p><div class="row">${cancel}</div>`;
     }
     if (d.need === 'from') {
       return `${head}<p>Wähle dein Startgebiet (mind. 2 Truppen).</p><div class="row">${cancel}</div>`;
@@ -1265,7 +1288,7 @@ export class GameView {
         return `<li class="${pid === cur && s.phase !== 'gameover' ? 'current' : ''} ${p.alive ? '' : 'dead'}">
           <span class="dot" style="background:${p.color}"></span>
           <span class="pname">${esc(p.name)}${you ? ' <em>(du)</em>' : ''}${lp?.isHost ? ' <span class="badge">Host</span>' : ''}${offline ? ' <span class="badge off">offline</span>' : ''}${p.alive && p.orden?.length ? ` <span class="orden-count" title="Orden">🎖 ${p.orden.length}</span>` : ''}${depBadge}${missionDots}${pillory}</span>
-          <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
+          <span class="stats">${p.alive ? `${countTerritories(s, pid)} Geb. · ${s.fog && pid !== this.me() ? '?' : countTroops(s, pid)} Tr.` : 'ausgeschieden'}</span>
         </li>`;
       })
       .join('');

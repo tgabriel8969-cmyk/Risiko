@@ -54,6 +54,36 @@ export function ordenSets(orden = []) {
  * sodass sie auch in den Browser-DevTools nicht lesbar sind. Für Felder, die erst in
  * späteren Schritten entstehen (mission, depeschen, stats, …), wird hier schon gefiltert.
  */
+/**
+ * Gebiete, deren Truppenzahl `pid` sehen darf (§7). Ohne Nebel: alle. Mit Nebel: eigene
+ * Gebiete + angrenzende; „Aufklärung" deckt den ganzen Zug alles auf, „Späher" ein entferntes
+ * Gebiet samt Nachbarn; fremde „Tarnung" blendet gegnerische Gebiete trotz Angrenzung aus.
+ */
+export function visibleTerritories(s, pid) {
+  const all = Object.keys(s.territories);
+  if (!s.fog) return new Set(all);
+  const p = playerById(s, pid);
+  if (p?.aufklaerungTurn === s.turn) return new Set(all); // Nebel diesen Zug ganz weg
+  const vis = new Set();
+  for (const t of all) {
+    if (s.territories[t].owner === pid) { // eigenes Gebiet + alle Nachbarn
+      vis.add(t);
+      for (const n of ADJACENCY[t]) vis.add(n);
+    }
+  }
+  // Fremde Tarnung: deren getarnte Gebiete wieder verdecken (eigene bleiben sichtbar)
+  for (const other of s.players) {
+    if (other.id === pid || !other.tarnung || s.turn >= other.tarnung.until) continue;
+    for (const t of other.tarnung.tiles) if (s.territories[t]?.owner !== pid) vis.delete(t);
+  }
+  // Späher deckt ein entferntes Gebiet samt Nachbarn auf (schlägt Tarnung)
+  if (p?.spaeher && s.turn <= p.spaeher.until) {
+    vis.add(p.spaeher.center);
+    for (const n of ADJACENCY[p.spaeher.center] || []) vis.add(n);
+  }
+  return vis;
+}
+
 export function viewFor(state, playerId) {
   if (!state) return state;
   const v = structuredClone(state);
@@ -64,8 +94,20 @@ export function viewFor(state, playerId) {
   if (v.depeschenDiscard) v.depeschenDiscardCount = { 1: v.depeschenDiscard[1].length, 2: v.depeschenDiscard[2].length };
   delete v.depeschenDeck;
   delete v.depeschenDiscard;
+  // Nebel: fremde Truppenzahlen (und Generäle) außerhalb der eigenen Sicht ausblenden –
+  // vor dem Entfernen der Tarnungs-Felder, da diese die Sicht mitbestimmen.
+  if (v.fog) {
+    const vis = visibleTerritories(v, playerId);
+    for (const [tid, t] of Object.entries(v.territories)) {
+      if (!vis.has(tid)) { t.troops = null; t.fog = true; } // null = verborgen, auch in DevTools
+    }
+    for (const p of v.players || []) {
+      if (p.id !== playerId && p.general && !vis.has(p.general)) p.general = null; // nur für diese Sicht
+    }
+  }
   for (const p of v.players || []) {
     if (p.id === playerId) continue; // eigene Infos bleiben vollständig
+    delete p.spaeher; delete p.tarnung; delete p.aufklaerungTurn; // Nebel-Effekte sind geheim
     if (v.phase === 'gameover' && p.id === v.winner) continue; // Sieger-Mission wird aufgedeckt
     delete p.mission; // sichtbar bleiben nur p.stagesDone und p.pillory (öffentlich)
     delete p.missionOptions; // zur Wahl stehende Missionen sind geheim
@@ -88,6 +130,10 @@ export const DEPESCHE_CARDS = {
   // Stufe I – Taktik
   gewaltmarsch: { level: 1, name: 'Gewaltmarsch', phases: ['attack', 'fortify'], info: 'Einmal zusätzlich über eigene Gebiete verschieben, ohne den Zug zu beenden.' },
   nachschub: { level: 1, name: 'Nachschub', phases: ['reinforce', 'attack', 'fortify'], info: '+3 Truppen auf ein beliebiges eigenes Gebiet.' },
+  // Nur mit Nebel im Stapel (§9)
+  aufklaerung: { level: 1, needsFog: true, phases: ['reinforce', 'attack', 'fortify'], name: 'Aufklärung', info: 'Hebt den Nebel für den Rest deines Zugs komplett auf.' },
+  spaeher: { level: 1, needsFog: true, phases: ['reinforce', 'attack', 'fortify'], name: 'Späher', info: 'Ein beliebiges Gebiet samt Nachbarn bis Ende deines nächsten Zugs sichtbar.' },
+  tarnung: { level: 1, needsFog: true, phases: ['reinforce', 'attack', 'fortify'], name: 'Tarnung', info: '3 eigene Gebiete zeigen Gegnern bis zu deinem nächsten Zug „?" statt der Truppenzahl.' },
   // Stufe II – stark
   luftbruecke: { level: 2, name: 'Luftbrücke', phases: ['attack', 'fortify'], info: 'Truppen zwischen zwei beliebigen eigenen Gebieten verschieben – ohne Verbindung.' },
   sabotage: { level: 2, name: 'Sabotage', phases: ['reinforce', 'attack', 'fortify'], info: 'Ein gegnerisches Gebiet verliert 3 Truppen (nie unter 1).' },
@@ -98,10 +144,11 @@ export const DEPESCHE_CARDS = {
 };
 export const depescheName = (id) => DEPESCHE_CARDS[id]?.name ?? id;
 
-function buildDepescheDecks(rng, general) {
+function buildDepescheDecks(rng, general, fog) {
   const deck = { 1: [], 2: [] };
   for (const [id, c] of Object.entries(DEPESCHE_CARDS)) {
     if (c.needsGeneral && !general) continue; // Karten ohne nutzbares System weglassen (§9)
+    if (c.needsFog && !fog) continue;
     for (let i = 0; i < DEPESCHE_COPIES; i++) deck[c.level].push(id);
   }
   return { 1: shuffle(deck[1], rng), 2: shuffle(deck[2], rng) };
@@ -562,6 +609,16 @@ export function createGame(players, rng = Math.random, options = {}) {
     }
   }
 
+  // Nebel des Krieges (optional): fremde Truppenzahlen außerhalb der eigenen Sicht verborgen.
+  state.fog = options.fog === true;
+  if (state.fog) {
+    for (const p of state.players) {
+      p.aufklaerungTurn = 0; // Zug, in dem „Aufklärung" aktiv ist (Nebel diesen Zug ganz weg)
+      p.spaeher = null; // { center, until } – entferntes Gebiet + Nachbarn sichtbar
+      p.tarnung = null; // { tiles:[...], until } – eigene Gebiete zeigen Gegnern „?"
+    }
+  }
+
   // Missionen nur ab 3 Spielern und wenn aktiviert; jeder zieht verdeckt eine
   state.missions = options.missions === true && players.length >= MISSION_MIN_PLAYERS;
   if (state.missions) {
@@ -576,7 +633,7 @@ export function createGame(players, rng = Math.random, options = {}) {
       p.depeschenChoice = []; // offene Belohnungs-Wahlen (Warteschlange)
       p.pillory = null; // öffentlicher Missionstyp, sobald enttarnt (§6.4)
     }
-    state.depeschenDeck = buildDepescheDecks(rng, state.general);
+    state.depeschenDeck = buildDepescheDecks(rng, state.general, state.fog);
     state.depeschenDiscard = { 1: [], 2: [] };
     state.depeschePlayedThisTurn = false;
     state.tieBreakAttacker = null; // Überraschungsangriff: Gleichstand geht an diesen Angreifer
@@ -818,6 +875,7 @@ function playDepescheEffect(s, id, a, pid) {
     const t = s.territories[a.target];
     if (!t) return 'Unbekanntes Gebiet.';
     if (t.owner === pid) return 'Sabotage trifft nur gegnerische Gebiete.';
+    if (s.fog && !visibleTerritories(s, pid).has(a.target)) return 'Im Nebel kannst du nur sichtbare Gebiete sabotieren.';
     t.troops = Math.max(1, t.troops - 3);
     return null;
   }
@@ -834,6 +892,25 @@ function playDepescheEffect(s, id, a, pid) {
   }
   if (id === 'ueberraschung') {
     s.tieBreakAttacker = pid;
+    return null;
+  }
+  if (id === 'aufklaerung') {
+    if (!s.fog) return 'Ohne Nebel gibt es nichts aufzuklären.';
+    playerById(s, pid).aufklaerungTurn = s.turn; // Rest des Zugs alles sichtbar
+    return null;
+  }
+  if (id === 'spaeher') {
+    if (!s.fog) return 'Ohne Nebel gibt es nichts auszuspähen.';
+    if (!s.territories[a.target]) return 'Unbekanntes Gebiet.';
+    playerById(s, pid).spaeher = { center: a.target, until: s.turn + s.order.length }; // bis Ende des nächsten eigenen Zugs
+    return null;
+  }
+  if (id === 'tarnung') {
+    if (!s.fog) return 'Ohne Nebel gibt es nichts zu tarnen.';
+    const tiles = Array.isArray(a.targets) ? [...new Set(a.targets)] : [];
+    if (tiles.length !== 3) return 'Wähle genau 3 eigene Gebiete.';
+    if (!tiles.every(own)) return 'Du kannst nur eigene Gebiete tarnen.';
+    playerById(s, pid).tarnung = { tiles, until: s.turn + s.order.length }; // bis Beginn des nächsten eigenen Zugs
     return null;
   }
   if (id === 'abgefangen') {
