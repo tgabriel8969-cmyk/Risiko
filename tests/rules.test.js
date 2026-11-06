@@ -699,6 +699,118 @@ test('abgefangen: ohne gültiges Pranger-Ziel wird beim Ziehen ersetzt', () => {
   for (const c of me.depeschenChoice[0].cards) assert.notEqual(c, 'abgefangen', 'kein Pranger ohne Ziel');
 });
 
+// ------------------------------------------------------------------ General-System
+
+test('General: Start nur mit Option, auf eigenem Gebiet; sonst keiner', () => {
+  const on = createGame(players(3), seeded(500), { general: true });
+  assert.equal(on.general, true);
+  for (const p of on.players) {
+    assert.ok(p.general, `Spieler ${p.id} hat keinen General`);
+    assert.equal(on.territories[p.general].owner, p.id, 'General steht auf fremdem Gebiet');
+  }
+  const off = createGame(players(3), seeded(500), {});
+  assert.equal(off.general, false);
+  assert.ok(off.players.every((p) => p.general == null));
+});
+
+test('General: +1 auf höchsten Würfel beim Angriff entscheidet den Gleichstand', () => {
+  // attackerGeneral steuert, ob der General auf dem angreifenden Gebiet steht.
+  const run = (attackerGeneral) => {
+    const s = createGame(players(2), seeded(501), { general: true });
+    const pid = s.order[0]; const other = s.order[1];
+    for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+    const from = 'ontario'; const to = ADJACENCY[from][0];
+    s.territories[from] = { owner: pid, troops: 5 };
+    s.territories[to] = { owner: other, troops: 1 };
+    s.phase = 'attack'; s.current = 0; s.pendingMove = null;
+    s.players.find((p) => p.id === pid).general = attackerGeneral ? from : null;
+    s.players.find((p) => p.id === other).general = null; // Verteidiger-General spielt hier keine Rolle
+    const r = applyAction(s, { type: 'attack', from, to, dice: 1 }, pid, diceSeq([3, 3]));
+    assert.ifError(r.error);
+    return r.state.territories[to].owner === pid;
+  };
+  assert.equal(run(true), true, 'Gleichstand 3:3 mit General-Bonus → erobert');
+  assert.equal(run(false), false, 'Gleichstand 3:3 ohne General → Verteidiger hält');
+});
+
+test('General: +1 in der Verteidigung hält ein Gebiet, das sonst fiele', () => {
+  const s = createGame(players(2), seeded(502), { general: true });
+  const pid = s.order[0]; const other = s.order[1];
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+  const from = 'ontario'; const to = ADJACENCY[from][0];
+  s.territories[from] = { owner: pid, troops: 5 };
+  s.territories[to] = { owner: other, troops: 1 };
+  s.phase = 'attack'; s.current = 0; s.pendingMove = null;
+  s.players.find((p) => p.id === pid).general = ADJACENCY['ontario'][1]; // Angreifer-General nicht auf from
+  s.players.find((p) => p.id === other).general = to; // Verteidiger-General auf dem Zielgebiet
+  // Wurf 5:4 → ohne Bonus würde der Angreifer erobern; mit Verteidiger-Bonus 5:5 → Verteidiger hält
+  const r = applyAction(s, { type: 'attack', from, to, dice: 1 }, pid, diceSeq([5, 4]));
+  assert.ifError(r.error);
+  assert.equal(r.state.territories[to].owner, other, 'Verteidiger-General hält das Gebiet');
+});
+
+test('General: fällt, wenn sein Gebiet erobert wird (+ killedGeneralOf)', () => {
+  const s = createGame(players(3), seeded(503), { general: true, missions: true });
+  const pid = s.order[0]; const other = s.order[1];
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: pid, troops: 2 };
+  const from = 'ontario'; const to = ADJACENCY[from][0];
+  s.territories[from] = { owner: pid, troops: 10 };
+  s.territories[to] = { owner: other, troops: 1 };
+  s.players.find((p) => p.id === other).general = to; // Ziel trägt den gegnerischen General
+  s.players.find((p) => p.id === pid).general = from;
+  s.players.find((p) => p.id === pid).stats = { defendedSinceOwnTurn: 0 };
+  s.phase = 'attack'; s.current = 0; s.pendingMove = null;
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  const r = applyAction(s, { type: 'blitz', from, to }, pid, diceSeq([6, 1]));
+  assert.ifError(r.error);
+  assert.equal(r.state.players.find((p) => p.id === other).general, null, 'General ist gefallen');
+  assert.ok(r.state.players.find((p) => p.id === pid).stats.killedGeneralOf.includes(other));
+});
+
+test('General: rückt bei occupy/fortify nur auf Wunsch mit', () => {
+  // occupy mit withGeneral
+  let s = createGame(players(2), seeded(504), { general: true });
+  const pid = s.order[0];
+  s.phase = 'attack'; s.current = 0;
+  const from = 'ontario'; const to = ADJACENCY[from][0];
+  s.territories[from] = { owner: pid, troops: 5 };
+  s.territories[to] = { owner: pid, troops: 0 };
+  s.players.find((p) => p.id === pid).general = from;
+  s.pendingMove = { from, to, min: 1, max: 4 };
+  let r = applyAction(s, { type: 'occupy', count: 2, withGeneral: true }, pid);
+  assert.ifError(r.error);
+  assert.equal(r.state.players.find((p) => p.id === pid).general, to, 'General mitgerückt');
+  // ohne Flag bleibt er stehen
+  s.pendingMove = { from, to, min: 1, max: 4 };
+  s.players.find((p) => p.id === pid).general = from;
+  r = applyAction(s, { type: 'occupy', count: 2 }, pid);
+  assert.equal(r.state.players.find((p) => p.id === pid).general, from, 'General bleibt ohne Flag');
+});
+
+// ------------------------------------------------------------------ Zug-Historie (Pfeile)
+
+test('Zug-Historie: Pfeile sammeln sich im Zug und werden zu Zugbeginn geleert', () => {
+  let s = createGame(players(2), seeded(600), {});
+  const pid = s.order[0]; const other = s.order[1];
+  for (const t of Object.keys(s.territories)) s.territories[t] = { owner: other, troops: 1 };
+  const from = 'ontario'; const to = ADJACENCY[from][0];
+  s.territories[from] = { owner: pid, troops: 10 };
+  s.territories[to] = { owner: other, troops: 1 };
+  s.phase = 'attack'; s.current = 0; s.pendingMove = null; s.turnMoves = [];
+  s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  let r = applyAction(s, { type: 'blitz', from, to }, pid, diceSeq([6, 1]));
+  assert.ifError(r.error);
+  assert.equal(r.state.turnMoves.length, 1);
+  assert.equal(r.state.turnMoves[0].from, from);
+  assert.equal(r.state.turnMoves[0].conquered, true);
+  // Zug zu Ende spielen → zu Beginn des nächsten Zugs ist die Historie leer
+  let st = r.state;
+  if (st.pendingMove) st = applyAction(st, { type: 'occupy', count: st.pendingMove.min }, pid).state;
+  st = applyAction(st, { type: 'endAttack' }, pid).state;
+  st = applyAction(st, { type: 'endTurn' }, pid, seeded(1)).state;
+  assert.equal(st.turnMoves.length, 0, 'zu Zugbeginn geleert');
+});
+
 // ------------------------------------------------------------------ Missions-Bot (Schritt 6)
 
 test('Missions-Bot: Partien enden, Siege sind gültig und Missionen sind erreichbar', () => {
@@ -805,6 +917,9 @@ function checkInvariants(s) {
   }
   for (const p of s.players) {
     assert.equal(p.alive, countTerritories(s, p.id) > 0, `alive-Flag falsch bei ${p.id}`);
+    if (s.general && p.general != null) {
+      assert.equal(s.territories[p.general].owner, p.id, `General von ${p.id} steht auf fremdem/leerem Gebiet`);
+    }
   }
   assert.ok(s.reinforcements >= 0);
 }
@@ -814,7 +929,7 @@ test('Simulation: 60 Zufallspartien mit 2–7 Bots verletzen keine Invarianten',
   for (let g = 0; g < 60; g++) {
     const rng = seeded(1000 + g);
     const n = 2 + (g % 6);
-    let s = createGame(players(n), rng, { ordenMode: g % 2 ? 'dynamic' : 'static', missions: g % 3 !== 0 });
+    let s = createGame(players(n), rng, { ordenMode: g % 2 ? 'dynamic' : 'static', missions: g % 3 !== 0, general: g % 2 === 0 });
     for (let i = 0; i < 30000 && s.phase !== 'gameover'; i++) {
       const action = botAction(s, rng);
       const r = applyAction(s, action, currentPlayerId(s), rng);

@@ -484,6 +484,14 @@ function moveTroops(from, to, n) {
   to.troops += n;
 }
 
+// Pfeil-Historie des Zugs ergänzen (gleiche Strecke nicht doppelt; Eroberung „gewinnt").
+function recordMove(s, from, to, kind, conquered = false) {
+  if (!Array.isArray(s.turnMoves)) s.turnMoves = [];
+  const prev = s.turnMoves.find((m) => m.from === from && m.to === to && m.kind === kind);
+  if (prev) prev.conquered = prev.conquered || conquered;
+  else s.turnMoves.push({ from, to, kind, conquered });
+}
+
 // ---------------------------------------------------------------- Spielstart
 
 /**
@@ -516,11 +524,23 @@ export function createGame(players, rng = Math.random, options = {}) {
     ordenMode: options.ordenMode === 'dynamic' ? 'dynamic' : 'static',
     setsRedeemed: 0, // global, steuert die dynamische Staffelung
     lastCombat: null,
+    turnMoves: [], // Pfeil-Historie des laufenden Zugs (wird in startTurn geleert)
     winner: null,
     log: [],
   };
   const start = START_ARMIES[players.length];
   for (const pid of order) state.setupRemaining[pid] = Math.max(0, start - countTerritories(state, pid));
+
+  // General-System (optional, unabhängig von Missionen): jeder hat einen General auf
+  // einem zufälligen eigenen Gebiet. Er gibt seinem Gebiet +1 auf den höchsten Würfel
+  // (Angriff & Verteidigung), rückt auf Wunsch mit und fällt, wenn sein Gebiet erobert wird.
+  state.general = options.general === true;
+  if (state.general) {
+    for (const p of state.players) {
+      const mine = Object.keys(territories).filter((tid) => territories[tid].owner === p.id);
+      p.general = mine.length ? mine[Math.floor(rng() * mine.length)] : null;
+    }
+  }
 
   // Missionen nur ab 3 Spielern und wenn aktiviert; jeder zieht verdeckt eine
   state.missions = options.missions === true && players.length >= MISSION_MIN_PLAYERS;
@@ -570,6 +590,7 @@ function startTurn(s, rng = Math.random) {
   const pid = currentPlayerId(s);
   // Zähler für diesen Zug zurücksetzen
   s.turnStats = { conquered: 0, conqueredFrom: {}, conqueredIn: {} };
+  s.turnMoves = []; // Pfeil-Historie dieses Zugs (Angriffe/Verschiebungen), für alle sichtbar
   s.depeschePlayedThisTurn = false;
   s.tieBreakAttacker = null;
   if (s.missions) {
@@ -648,6 +669,11 @@ function checkAttack(s, fromId, toId, pid) {
   return null;
 }
 
+// Steht der General von `pid` auf diesem Gebiet? (nur bei aktivem General-System)
+function generalOn(s, pid, tid) {
+  return s.general && playerById(s, pid)?.general === tid;
+}
+
 function battleRound(s, fromId, toId, attDice, rng) {
   const from = s.territories[fromId];
   const to = s.territories[toId];
@@ -656,15 +682,20 @@ function battleRound(s, fromId, toId, attDice, rng) {
   const def = Array.from({ length: defDice }, () => rollDie(rng)).sort((a, b) => b - a);
   // Überraschungsangriff (Depesche): für diesen Angreifer gewinnt Gleichstand
   const tieToAtt = s.tieBreakAttacker && s.tieBreakAttacker === from.owner;
+  // General gibt +1 auf den höchsten Würfel (nur im Vergleich, die rohen Würfel bleiben sichtbar)
+  const attBonus = generalOn(s, from.owner, fromId) ? 1 : 0;
+  const defBonus = generalOn(s, to.owner, toId) ? 1 : 0;
   let attLoss = 0;
   let defLoss = 0;
   for (let i = 0; i < Math.min(att.length, def.length); i++) {
-    if (att[i] > def[i] || (att[i] === def[i] && tieToAtt)) defLoss++;
+    const a = att[i] + (i === 0 ? attBonus : 0);
+    const d = def[i] + (i === 0 ? defBonus : 0);
+    if (a > d || (a === d && tieToAtt)) defLoss++;
     else attLoss++; // sonst gewinnt bei Gleichstand der Verteidiger
   }
   from.troops -= attLoss;
   to.troops -= defLoss;
-  return { att, def, attLoss, defLoss };
+  return { att, def, attLoss, defLoss, attBonus, defBonus };
 }
 
 function conquer(s, fromId, toId, dice, pid, rng = Math.random) {
@@ -683,6 +714,17 @@ function conquer(s, fromId, toId, dice, pid, rng = Math.random) {
   }
   if (s.lastCombat) s.lastCombat.conquered = true;
   addLog(s, `${playerName(s, pid)} erobert ${territoryName(toId)}!`);
+
+  // General des bisherigen Besitzers fällt, wenn sein Gebiet erobert wird (§General).
+  if (s.general) {
+    const victim = playerById(s, prevOwner);
+    if (victim?.general === toId) {
+      victim.general = null;
+      const att = playerById(s, pid);
+      if (att?.stats) (att.stats.killedGeneralOf ||= []).push(prevOwner); // für Vernichtung-Etappe 2 (Schritt 7)
+      addLog(s, `⚔️ ${playerName(s, pid)} hat den General von ${victim.name} besiegt!`);
+    }
+  }
 
   if (countTerritories(s, prevOwner) === 0) {
     const dead = playerById(s, prevOwner);
@@ -872,14 +914,17 @@ const HANDLERS = {
     s.lastCombat = {
       attacker: pid, defender, from: a.from, to: a.to, rounds: 1,
       att: r.att, def: r.def, attLoss: r.attLoss, defLoss: r.defLoss, conquered: false,
+      attBonus: r.attBonus, defBonus: r.defBonus,
     };
     addLog(
       s,
       `${playerName(s, pid)} greift ${territoryName(a.to)} (${playerName(s, defender)}) an: ` +
         `[${r.att.join(' ')}] gegen [${r.def.join(' ')}] – Verluste ${r.attLoss}:${r.defLoss}.`,
     );
-    if (s.territories[a.to].troops === 0) conquer(s, a.from, a.to, dice, pid, rng);
+    const conquered = s.territories[a.to].troops === 0;
+    if (conquered) conquer(s, a.from, a.to, dice, pid, rng);
     else countDefense(s, a.to, defender);
+    recordMove(s, a.from, a.to, 'attack', conquered);
     if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
   },
@@ -905,24 +950,31 @@ const HANDLERS = {
     s.lastCombat = {
       attacker: pid, defender, from: a.from, to: a.to, rounds,
       att: last.att, def: last.def, attLoss, defLoss, conquered: false,
+      attBonus: last.attBonus, defBonus: last.defBonus,
     };
     addLog(
       s,
       `${playerName(s, pid)} startet einen Blitz-Angriff von ${territoryName(a.from)} auf ` +
         `${territoryName(a.to)} (${playerName(s, defender)}): ${rounds} Runde(n), Verluste ${attLoss}:${defLoss}.`,
     );
-    if (to.troops === 0) conquer(s, a.from, a.to, dice, pid, rng);
+    const conquered = to.troops === 0;
+    if (conquered) conquer(s, a.from, a.to, dice, pid, rng);
     else countDefense(s, a.to, defender);
+    recordMove(s, a.from, a.to, 'attack', conquered);
     if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
   },
 
-  occupy(s, a) {
+  occupy(s, a, pid) {
     if (s.phase !== 'attack' || !s.pendingMove) return 'Es gibt gerade nichts nachzurücken.';
     const pm = s.pendingMove;
     const count = toInt(a.count);
     if (!(count >= pm.min && count <= pm.max)) return `Wähle zwischen ${pm.min} und ${pm.max} Truppen.`;
     moveTroops(s.territories[pm.from], s.territories[pm.to], count);
+    if (a.withGeneral && generalOn(s, pid, pm.from)) {
+      playerById(s, pid).general = pm.to; // General rückt in das eroberte Gebiet mit
+      addLog(s, `${playerName(s, pid)} verlegt den General nach ${territoryName(pm.to)}.`);
+    }
     s.pendingMove = null;
     return null;
   },
@@ -945,7 +997,12 @@ const HANDLERS = {
     const count = toInt(a.count);
     if (!(count >= 1 && count <= from.troops - 1)) return `Du kannst 1 bis ${from.troops - 1} Truppe(n) verschieben.`;
     moveTroops(from, to, count);
+    recordMove(s, a.from, a.to, 'fortify', false);
     addLog(s, `${playerName(s, pid)} verschiebt ${count} Truppe(n) von ${territoryName(a.from)} nach ${territoryName(a.to)}.`);
+    if (a.withGeneral && generalOn(s, pid, a.from)) {
+      playerById(s, pid).general = a.to; // General zieht mit
+      addLog(s, `${playerName(s, pid)} verlegt den General nach ${territoryName(a.to)}.`);
+    }
     finishTurn(s, rng);
     return null;
   },

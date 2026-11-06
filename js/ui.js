@@ -50,6 +50,7 @@ export class GameView {
     this.phaseKey = null;
     this.depesche = null; // aktuell „scharfgeschaltete“ Depesche: { index, id, need, from, to }
     this.discardSel = null; // bei voller Hand: Index der zum Ablegen gewählten Karte
+    this.withGeneral = true; // General bei occupy/fortify mitnehmen? (Grundsatz: ja)
     this.debugPos = {}; // id -> {x,y} Overrides beim Verschieben im Debug-Modus
     this.shapeOverride = {}; // id -> [[x,y],...] bearbeitete Landflächen
     this.debugMode = 'tokens'; // 'tokens' | 'borders' | 'sea'
@@ -78,12 +79,14 @@ export class GameView {
         <div class="board">
           <svg data-ref="map" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${MAP_SIZE.width} ${MAP_SIZE.height}"
                role="img" aria-label="Weltkarte"></svg>
-          <div class="orden-tray" data-ref="ordenTray"></div>
+          <div class="trays">
+            <div class="orden-tray" data-ref="ordenTray"></div>
+            <section class="depeschen-tray" data-ref="depeschen"></section>
+          </div>
         </div>
         <aside class="side">
           <section class="card panel" data-ref="panel"></section>
           <section class="card mission" data-ref="mission"></section>
-          <section class="card depeschen" data-ref="depeschen"></section>
           <section class="card" data-ref="players"></section>
           <section class="card log" data-ref="log"></section>
           <section class="card orden-info" data-ref="ordenInfo"></section>
@@ -141,6 +144,7 @@ export class GameView {
       this.sel = { from: null, to: null };
       this.moveCount = null;
       this.depesche = null; // scharfgeschaltete Depesche beim Zug-/Phasenwechsel vergessen
+      this.withGeneral = true; // Grundsatz: General rückt mit
       this.phaseKey = key;
       this.hotseatMissionFor = null; // Hot-Seat: Mission beim Zug-/Phasenwechsel wieder verdecken
     }
@@ -182,7 +186,7 @@ export class GameView {
   }
 
   dispatch(action) {
-    if (action.type === 'occupy' || action.type === 'fortify') this.moveCount = null;
+    if (action.type === 'occupy' || action.type === 'fortify') { this.moveCount = null; this.withGeneral = true; }
     this._dispatch(action);
   }
 
@@ -391,11 +395,15 @@ export class GameView {
         break;
       case 'occupy': {
         const pm = s.pendingMove;
-        this.dispatch({ type: 'occupy', count: clamp(this.moveCount ?? pm.max, pm.min, pm.max) });
+        this.dispatch({ type: 'occupy', count: clamp(this.moveCount ?? pm.max, pm.min, pm.max), withGeneral: this.withGeneral });
         break;
       }
       case 'fortify':
-        this.dispatch({ type: 'fortify', from, to, count: this.moveCount });
+        this.dispatch({ type: 'fortify', from, to, count: this.moveCount, withGeneral: this.withGeneral });
+        break;
+      case 'toggleGeneral':
+        this.withGeneral = !this.withGeneral;
+        this.renderPanel();
         break;
       case 'endTurn':
         this.dispatch({ type: 'endTurn' });
@@ -946,28 +954,36 @@ export class GameView {
       out += `<text class="cont-label" x="${c.label.x}" y="${c.label.y}">${esc(c.name)} +${c.bonus}</text>`;
     }
 
-    // Letzter Angriff als Pfeil
-    const c = s.lastCombat;
-    if (c) {
-      const A = TB[c.from];
-      const B = TB[c.to];
-      const color = playerById(s, c.attacker)?.color ?? '#fff';
-      const arrow = (x1, y1, x2, y2, startPad, endPad, head) => {
+    // Zug-Historie: alle Angriffe/Verschiebungen des laufenden Zugs als Pfeile (für alle sichtbar).
+    const moves = s.turnMoves || [];
+    if (moves.length) {
+      const color = playerById(s, currentPlayerId(s))?.color ?? '#fff';
+      const arrow = (x1, y1, x2, y2, startPad, endPad, head, cls) => {
         const len = Math.hypot(x2 - x1, y2 - y1) || 1;
         const ux = (x2 - x1) / len;
         const uy = (y2 - y1) / len;
-        return `<line class="combat-arrow" stroke="${color}" ${head ? 'marker-end="url(#arrowhead)"' : ''}
+        return `<line class="combat-arrow ${cls}" stroke="${color}" ${head ? 'marker-end="url(#arrowhead)"' : ''}
           x1="${x1 + ux * startPad}" y1="${y1 + uy * startPad}" x2="${x2 - ux * endPad}" y2="${y2 - uy * endPad}"/>`;
       };
-      if (Math.abs(B.x - A.x) > W / 2) {
-        // Angriff über den Kartenrand: zum Rand hinaus, auf der anderen Seite wieder herein
-        const ym = (A.y + B.y) / 2;
-        const exitX = A.x < B.x ? 0 : W;
-        out += arrow(A.x, A.y, exitX, ym, 24, 0, false) + arrow(W - exitX, ym, B.x, B.y, 0, 27, true);
-      } else {
-        out += arrow(A.x, A.y, B.x, B.y, 24, 27, true);
+      for (const m of moves) {
+        const A = TB[m.from];
+        const B = TB[m.to];
+        if (!A || !B) continue;
+        const cls = `${m.kind}${m.conquered ? ' conquered' : ''}`;
+        if (Math.abs(B.x - A.x) > W / 2) {
+          // Strecke über den Kartenrand: hinaus und auf der anderen Seite wieder herein
+          const ym = (A.y + B.y) / 2;
+          const exitX = A.x < B.x ? 0 : W;
+          out += arrow(A.x, A.y, exitX, ym, 24, 0, false, cls) + arrow(W - exitX, ym, B.x, B.y, 0, 27, true, cls);
+        } else {
+          out += arrow(A.x, A.y, B.x, B.y, 24, 27, true, cls);
+        }
       }
     }
+
+    // Standorte der Generäle (öffentlich): Gebiet -> Besitzerfarbe
+    const generalAt = {};
+    if (s.general) for (const p of s.players) if (p.general) generalAt[p.general] = p.color;
 
     // Gebiete
     for (const t of TERRITORIES) {
@@ -1003,7 +1019,8 @@ export class GameView {
           <circle class="token" cx="${tx}" cy="${ty}" r="10" fill="${owner.color}"/>
           <text class="troops" x="${tx}" y="${ty}" fill="${textColorFor(owner.color)}">${st.troops}</text>
           <text class="tname" x="${tx}" y="${ty + 21}">${esc(t.name)}</text>
-          <title>${esc(t.name)} – ${esc(owner.name)}, ${st.troops} Truppe(n)</title>
+          ${generalAt[t.id] ? `<text class="general-star" x="${tx + 12}" y="${ty - 9}" fill="${generalAt[t.id]}">★</text>` : ''}
+          <title>${esc(t.name)} – ${esc(owner.name)}, ${st.troops} Truppe(n)${generalAt[t.id] ? ' · General' : ''}</title>
         </g>`;
     }
 
@@ -1036,9 +1053,9 @@ export class GameView {
              <div><strong>${esc(w.name)}</strong> hat die Welt erobert!</div></div>
            <button data-act="home">Zurück zum Start</button>`;
     } else {
-      h = `<div class="turn-head">
+      h = `<div class="turn-head${mine ? ' mine' : ''}" style="--pc:${curP.color}">
              <span class="dot big" style="background:${curP.color}"></span>
-             <div><div class="who">${esc(curP.name)}${mine && this.ctx.mode !== 'local' ? ' (du)' : ''}</div>
+             <div><div class="who">${esc(curP.name)}${mine && this.ctx.mode !== 'local' ? ' (du)' : ''}${mine ? ' <span class="turn-badge">am Zug</span>' : ''}</div>
              <div class="phase">${PHASE_LABEL[s.phase]} · Zug ${s.turn}</div></div>
            </div>`;
       if (!mine) {
@@ -1094,6 +1111,13 @@ export class GameView {
       <div class="row"><button data-act="playDep">Spielen</button>${cancel}</div>`;
   }
 
+  // Umschalter „General mitnehmen", nur sichtbar wenn mein General auf dem Startgebiet steht.
+  generalToggle(fromId) {
+    const s = this.ctx.state;
+    if (!s.general || playerById(s, this.me())?.general !== fromId) return '';
+    return `<button class="gen-toggle${this.withGeneral ? ' on' : ''}" data-act="toggleGeneral">★ General mitnehmen: ${this.withGeneral ? 'ja' : 'nein'}</button>`;
+  }
+
   amountButtons(options) {
     return `<div class="seg" role="group" aria-label="Anzahl pro Klick">${options
       .map((v) => {
@@ -1136,6 +1160,7 @@ export class GameView {
         return `<p>${tn(pm.to)} erobert! Wie viele Truppen rücken nach?</p>
                 <div class="range"><input type="range" data-range min="${pm.min}" max="${pm.max}" value="${v}">
                 <output data-out>${v}</output></div>
+                ${this.generalToggle(pm.from)}
                 <button data-act="occupy">Nachrücken</button>`;
       }
       if (from && to) {
@@ -1169,6 +1194,7 @@ export class GameView {
         return `<p>Von ${tn(from)} nach ${tn(to)} verschieben:</p>
                 <div class="range"><input type="range" data-range min="1" max="${max}" value="${v}">
                 <output data-out>${v}</output></div>
+                ${this.generalToggle(from)}
                 <div class="row"><button data-act="fortify">Verschieben &amp; Zug beenden</button>
                 <button class="ghost" data-act="cancel">Abbrechen</button></div>`;
       }
@@ -1189,9 +1215,9 @@ export class GameView {
     return `<div class="combat">
       <div class="combat-title">Letzter Kampf: ${esc(territoryName(c.from))} → ${esc(territoryName(c.to))}
         ${c.rounds > 1 ? `<span class="muted">(Blitz, ${c.rounds} Runden – letzte Runde)</span>` : ''}</div>
-      <div class="dice"><span class="lbl"><span class="dot" style="background:${att.color}"></span>${esc(att.name)}</span>${dice(c.att, 'att')}</div>
-      <div class="dice"><span class="lbl"><span class="dot" style="background:${def.color}"></span>${esc(def.name)}</span>${dice(c.def, 'def')}</div>
-      <div class="small">Verluste: Angreifer −${c.attLoss}, Verteidiger −${c.defLoss}${c.conquered ? ' · <strong>erobert!</strong>' : ''}</div>
+      <div class="dice"><span class="lbl"><span class="dot" style="background:${att.color}"></span>${esc(att.name)}${c.attBonus ? ' <span class="gen-badge">★+1</span>' : ''}</span>${dice(c.att, 'att')}</div>
+      <div class="dice"><span class="lbl"><span class="dot" style="background:${def.color}"></span>${esc(def.name)}${c.defBonus ? ' <span class="gen-badge">★+1</span>' : ''}</span>${dice(c.def, 'def')}</div>
+      <div class="small">Verluste: Angreifer −${c.attLoss}, Verteidiger −${c.defLoss}${c.conquered ? ' · <strong>erobert!</strong>' : ''}${c.attBonus || c.defBonus ? ' · <span class="muted">General: +1 auf höchsten Würfel</span>' : ''}</div>
     </div>`;
   }
 

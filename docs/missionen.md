@@ -2,7 +2,8 @@
 
 Stand: 05.11.2026 · Status: **Schritte 1–6 umgesetzt** (Sichtbarkeit, Missions-Pool,
 Etappen, Depeschen inkl. UI, Pranger, Missions-Bot + Balance-Messung via
-`npm run balance`). Offen: 7 🔗 General · 8 🔗 Nebel. Balance-Nachjustierung bei Bedarf
+`npm run balance`). General-**Kern** gebaut (siehe `docs/general.md`). Offen: 7 🔗 General-Anbindung
+(Feldherr, Marschbefehl, Vernichtung-Etappe 2, General-Kill-Belohnung) · 8 🔗 Nebel. Balance-Nachjustierung bei Bedarf
 (aktuell auffällig: Bollwerk-Siegquote ~0 %, Weltmacht fällt mit steigender Spielerzahl).
 
 Diese Datei ist der Auftrag für die Umsetzung. Sie baut auf dem aktuellen Code auf
