@@ -82,6 +82,11 @@ export function missionBotAction(s, rng) {
     case 'reinforce': {
       const sets = ordenSets(self.orden);
       if (sets.length && (s.reinforcements === 0 || rng() < 0.5)) return { type: 'redeemOrden', set: sets[0] };
+      // Bastion: Truppen auf eine einzelne Festung (das eigene stärkste Gebiet) konzentrieren
+      if (self.mission?.id === 'g_bastion' && own.length) {
+        const fort = own.reduce((a, b) => (s.territories[a].troops >= s.territories[b].troops ? a : b));
+        return { type: 'place', territory: fort, count: s.reinforcements };
+      }
       const where = pick(goalBorder.length ? goalBorder : border.length ? border : own);
       return { type: 'place', territory: where, count: s.reinforcements };
     }
@@ -97,9 +102,7 @@ export function missionBotAction(s, rng) {
         }
       }
       if (!options.length) return { type: 'endAttack' };
-      // Bollwerk bleibt defensiver (Truppen für „≥2"-Ziel halten), greift seltener an.
-      const bollwerk = self.mission?.id === 'g_bollwerk';
-      if ((bollwerk && rng() < 0.5) || rng() < 0.03) return { type: 'endAttack' };
+      if (rng() < 0.03) return { type: 'endAttack' };
       const pref = options.filter(([, t]) => advances(t));
       const [f, t] = pick(pref.length ? pref : options);
       return rng() < 0.6 ? { type: 'blitz', from: f, to: t } : { type: 'attack', from: f, to: t };

@@ -6,8 +6,9 @@ Etappen, Depeschen inkl. UI, Pranger, Missions-Bot + Balance-Messung via
 Vernichtung-Etappe 2, General-Kill-Belohnung) gebaut – siehe `docs/general.md`. Etappe 2
 stellt 3 Depeschen zur Wahl. Schritt 8 (Nebel des Krieges) gebaut – siehe `docs/nebel.md`
 (inkl. Aufklärung/Späher/Tarnung, Sabotage-Sichtprüfung). Zusätzlich: Angriffslimit in der
-ersten Runde (max. 3). **Alle Roadmap-Schritte umgesetzt.** Balance-Nachjustierung bei Bedarf
-(aktuell auffällig: Bollwerk-Siegquote ~0 %, Weltmacht/Feldherr fallen mit steigender Spielerzahl).
+ersten Runde (max. 3); jede Belohnungswahl bietet 3 unterschiedliche Depeschen; **Bollwerk
+ersetzt durch Bastion** (Machtkonzentration). **Alle Roadmap-Schritte umgesetzt.**
+Balance-Nachjustierung bei Bedarf (Weltmacht/Feldherr fallen mit steigender Spielerzahl).
 
 Diese Datei ist der Auftrag für die Umsetzung. Sie baut auf dem aktuellen Code auf
 (`js/rules.js` mit Orden, `createGame(players, rng, options)`, `HANDLERS`).
@@ -56,7 +57,7 @@ funktionieren (siehe §9).
 Der Pool wird in `createGame` zusammengestellt:
 
 - 6 Kontinent-Missionen
-- 2 Gebiets-Missionen (Weltmacht, Bollwerk)
+- 2 Gebiets-Missionen (Weltmacht, Bastion)
 - 1 × Feldherr 🔗 (nur wenn `options.general`)
 - 1 Vernichtungs-Mission **pro Spieler** (Ziel = dieser Spieler). Eine Vernichtungs-Mission,
   deren Ziel man selbst ist, wird zurückgelegt und neu gezogen.
@@ -85,7 +86,11 @@ Werte „4–7 Spieler / 3 Spieler“:
 | id | Etappe 1 (Ereignis) | Etappe 2 (Zustand) | Endziel |
 |---|---|---|---|
 | `g_weltmacht` | in einem Zug **3 Gebiete** erobert | **18 / 22** Gebiete | **24 / 28** Gebiete |
-| `g_bollwerk` | **2 Angriffe abgewehrt** seit Ende des eigenen letzten Zugs (§5.2) | **14 / 17** Gebiete mit je ≥ 2 Truppen | **18 / 22** Gebiete mit je ≥ 2 Truppen |
+| `g_bastion` | ein Gebiet durch Verstärken/Verschieben auf **≥ 8 / 10 Truppen** bringen | **3 Gebiete** mit je **≥ 6 / 8 Truppen** | ein Gebiet mit **≥ 18 / 24 Truppen** **und** ein kompletter Kontinent |
+
+(Bastion ersetzt das frühere Bollwerk – Machtkonzentration statt passivem Halten. Die
+Etappe-1-Schwelle ist durch die Startverteilung nicht erreichbar; Etappe 1 wird daher wie ein
+Ereignis nach jeder eigenen Aktion geprüft, aber nie in der Aufstellungsphase.)
 
 ### 4.3 Vernichtung (`v_<playerId>`)
 
@@ -131,16 +136,14 @@ s.turnStats = {
 
 ```js
 player.stats = {
-  defendedSinceOwnTurn: 0,      // Bollwerk
   generalConquests: 0,          // Feldherr
   killedGeneralOf: [],          // Vernichtung Etappe 2
 };
 ```
 
-- **Abwehr** = eine Angriffsaktion (`attack` oder kompletter `blitz`) gegen ein Gebiet des
-  Spielers, nach der das Gebiet **noch ihm gehört**. Zählt pro Aktion, nicht pro Würfelrunde.
-- Bollwerk-Etappe 1 wird **zu Beginn des eigenen Zugs** geprüft (in `startTurn`, vor der
-  Berechnung der Verstärkung). Danach `defendedSinceOwnTurn = 0`.
+- Bastion-Etappe 1 (ein Gebiet ≥ Schwelle) wird **nach jeder eigenen Aktion** geprüft
+  (zentral in `applyAction` via `checkStage1`), aber **nie in der Aufstellung** – so bleibt die
+  „E1 nie durch Startverteilung"-Regel gewahrt, obwohl der Auslöser kein Eroberungs-Ereignis ist.
 
 ### 5.3 Belohnung bei Etappe
 
@@ -148,8 +151,7 @@ player.stats = {
 player.stageBonus += 2;   // MISSION_STAGE_BONUS
 ```
 - `stageBonus` wird in `calcReinforcements` addiert und danach auf 0 gesetzt.
-  Wird die Etappe zu Zugbeginn erreicht (Bollwerk), zählt der Bonus sofort im laufenden Zug.
-- Dazu eine **Depeschen-Wahl** (§6.2).
+- Dazu eine **Depeschen-Wahl** (§6.2): **3 unterschiedliche** Karten der passenden Stufe, davon 1 behalten.
 - Öffentliches Log: „Tobi hat eine Etappe erreicht (+2 Truppen, 1 Depesche).“
   **Welche** Etappe es war, bleibt geheim.
 - Spielerliste zeigt öffentlich den Fortschritt als ●●○ (Etappe 1, Etappe 2, Endziel).
@@ -173,7 +175,9 @@ player.stageBonus += 2;   // MISSION_STAGE_BONUS
 
 ### 6.2 Wahl
 
-Beim Auslösen: 2 Karten aus dem passenden Stapel ziehen → `player.depeschenChoice = [a, b]`.
+Beim Auslösen: bis zu **3 unterschiedliche** Karten aus dem passenden Stapel ziehen →
+`player.depeschenChoice = [{ level, cards }]` (weniger nur, wenn die Stufe nicht genug
+verschiedene Typen hergibt, z. B. Stufe I ohne Nebel). Keep-Wahl: `'a' | 'b' | 'c' | null`.
 Neue Aktion:
 
 ```js
@@ -278,8 +282,8 @@ export const MISSION_STAGE_BONUS = 2;
 export const DEPESCHE_HAND_LIMIT = 3;
 export const DEPESCHE_COPIES = 2;
 export const MISSION_TARGETS = {
-  g_weltmacht: { stage2: { 3: 22, default: 18 }, goal: { 3: 28, default: 24 } },
-  g_bollwerk:  { stage1Defends: 2, stage2: { 3: 17, default: 14 }, goal: { 3: 22, default: 18 }, minTroops: 2 },
+  g_weltmacht: { stage1Conquests: 3, stage2: { 3: 22, default: 18 }, goal: { 3: 28, default: 24 } },
+  g_bastion:   { stage1Troops: { 3: 10, default: 8 }, stage2Count: 3, stage2Troops: { 3: 8, default: 6 }, goalTroops: { 3: 24, default: 18 } },
   vernichtung: { stage1From: 2, stage2MaxTerritories: 4 },
   kontinent:   { stage1Conquests: 2 },
   feldherr:    { stage1GeneralConquests: 3, stage2Continents: 2, goalContinents: 3 },
@@ -295,7 +299,8 @@ export const MISSION_TARGETS = {
 - Etappen in umgekehrter Reihenfolge möglich; jede Etappe nur einmal belohnt.
 - `stageBonus` landet genau einmal in der Verstärkung.
 - Ausfallregel Vernichtung → Weltmacht, Etappen bleiben, Log privat.
-- Bollwerk: Abwehr zählt pro Aktion, Blitz = 1 Abwehr, Reset nach eigenem Zugbeginn.
+- Bastion: Etappe 1 (Festung ≥ Schwelle) greift beim Verstärken, **nicht** in der Aufstellung;
+  Etappe 2 = 3 Festungen; Endziel = Mega-Festung + kompletter Kontinent.
 - Depeschen: Handlimit, 1 pro Zug, Phasenprüfung, jede Karte mit gültigen und ungültigen Parametern.
 - `abgefangen`: nur Gegner ohne Pranger; verschwindet, wenn alle am Pranger stehen.
 - `viewFor`: fremde Mission, Hand, Wahl und private Logs sind nicht im Ergebnis enthalten.

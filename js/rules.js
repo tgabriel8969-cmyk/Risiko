@@ -186,13 +186,19 @@ function drawDepescheFor(s, pid, level, rng) {
   return card;
 }
 
-// Belohnungswahl auslösen: `count` Karten ziehen (Standard 2), in die Warteschlange legen.
-function grantDepescheChoice(s, pid, level, rng, count = 2) {
+// Belohnungswahl auslösen: bis zu `count` *unterschiedliche* Karten ziehen (Standard 3;
+// weniger nur, wenn die Stufe nicht genug verschiedene Typen hergibt), in die Warteschlange legen.
+function grantDepescheChoice(s, pid, level, rng, count = 3) {
   const cards = [];
-  for (let i = 0; i < count; i++) {
+  const setAside = [];
+  let guard = 0;
+  while (cards.length < count && guard++ < 50) {
     const c = drawDepescheFor(s, pid, level, rng);
-    if (c) cards.push(c);
+    if (!c) break; // Stapel und Ablage erschöpft
+    if (cards.includes(c)) { setAside.push(c); continue; } // schon dabei -> zurück auf die Ablage
+    cards.push(c);
   }
+  for (const c of setAside) s.depeschenDiscard[level].push(c);
   if (!cards.length) return;
   const p = playerById(s, pid);
   (p.depeschenChoice ||= []).push({ level, cards });
@@ -203,7 +209,8 @@ export const MISSION_MIN_PLAYERS = 3;
 export const MISSION_STAGE_BONUS = 2;
 export const MISSION_TARGETS = {
   g_weltmacht: { stage1Conquests: 3, stage2: { 3: 22, default: 18 }, goal: { 3: 28, default: 24 } },
-  g_bollwerk: { stage1Defends: 2, stage2: { 3: 17, default: 14 }, goal: { 3: 22, default: 18 }, minTroops: 2 },
+  // Bastion = Machtkonzentration: starke Truppen-Festungen statt Fläche.
+  g_bastion: { stage1Troops: { 3: 10, default: 8 }, stage2Count: 3, stage2Troops: { 3: 8, default: 6 }, goalTroops: { 3: 24, default: 18 } },
   vernichtung: { stage1From: 2, stage2MaxTerritories: 4 },
   kontinent: { stage1Conquests: 2 },
   feldherr: { stage1GeneralConquests: 3, stage2Continents: 2, goalContinents: 3 },
@@ -233,7 +240,7 @@ export function buildMissionPool(playerIds, options = {}) {
   return [
     ...Object.keys(KONTINENT_MISSIONS).map((id) => ({ id })),
     { id: 'g_weltmacht' },
-    { id: 'g_bollwerk' },
+    { id: 'g_bastion' },
     ...(options.general ? [{ id: 'f_feldherr' }] : []),
     ...playerIds.map((pid) => ({ id: `v_${pid}`, target: pid })),
   ];
@@ -278,7 +285,7 @@ export function missionName(mission, state) {
     return `Kontinente: ${KONTINENT_MISSIONS[id].map((c) => CONTINENTS[c].name).join(' + ')}${KONTINENT_EXTRA.has(id) ? ' + 1 weiterer' : ''}`;
   }
   if (id === 'g_weltmacht') return 'Weltmacht';
-  if (id === 'g_bollwerk') return 'Bollwerk';
+  if (id === 'g_bastion') return 'Bastion';
   if (mission.target) return `Vernichtung: ${state ? playerName(state, mission.target) : mission.target}`;
   if (id === 'f_feldherr') return 'Feldherr';
   return id;
@@ -290,7 +297,7 @@ export function missionType(mission) {
   if (!mission) return null;
   const id = mission.id;
   if (id in KONTINENT_MISSIONS) return 'kontinent';
-  if (id === 'g_weltmacht' || id === 'g_bollwerk') return 'gebiet';
+  if (id === 'g_weltmacht' || id === 'g_bastion') return 'gebiet';
   if (id === 'f_feldherr') return 'feldherr';
   if (mission.target || id.startsWith('v_')) return 'vernichtung';
   return null;
@@ -302,7 +309,7 @@ export function missionTargets(mission) {
   const id = mission.id;
   if (id in KONTINENT_MISSIONS) return { continents: KONTINENT_MISSIONS[id].slice(), targetPlayer: null, wantTerritories: false };
   if (mission.target) return { continents: [], targetPlayer: mission.target, wantTerritories: false };
-  // Weltmacht, Bollwerk, Feldherr: einfach expandieren bzw. Kontinente halten
+  // Weltmacht, Bastion, Feldherr: einfach expandieren bzw. Kontinente halten
   return { continents: [], targetPlayer: null, wantTerritories: true };
 }
 
@@ -318,7 +325,7 @@ export function missionGoalMet(s, pid, mission = playerById(s, pid)?.mission) {
     return true;
   }
   if (id === 'g_weltmacht') return countTerritories(s, pid) >= scaled(MISSION_TARGETS.g_weltmacht.goal, n);
-  if (id === 'g_bollwerk') return countTerritoriesWithTroops(s, pid, MISSION_TARGETS.g_bollwerk.minTroops) >= scaled(MISSION_TARGETS.g_bollwerk.goal, n);
+  if (id === 'g_bastion') return countTerritoriesWithTroops(s, pid, scaled(MISSION_TARGETS.g_bastion.goalTroops, n)) >= 1 && completedContinents(s, pid).length >= 1;
   if (mission.target) {
     const x = playerById(s, mission.target);
     return !!x && !x.alive && x.eliminatedBy === pid;
@@ -354,11 +361,14 @@ export function missionProgress(s, pid, mission = playerById(s, pid)?.mission) {
     stage1 = { text: 'In einem Zug 3 Gebiete erobern' };
     stage2 = { text: 'Gebiete besitzen', detail: `${c}/${scaled(T.g_weltmacht.stage2, n)}` };
     goal = { text: 'Gebiete besitzen', detail: `${c}/${scaled(T.g_weltmacht.goal, n)}`, met: missionGoalMet(s, pid, m) };
-  } else if (id === 'g_bollwerk') {
-    const c = countTerritoriesWithTroops(s, pid, T.g_bollwerk.minTroops);
-    stage1 = { text: '2 Angriffe abwehren (seit deinem letzten Zug)' };
-    stage2 = { text: 'Gebiete mit ≥ 2 Truppen', detail: `${c}/${scaled(T.g_bollwerk.stage2, n)}` };
-    goal = { text: 'Gebiete mit ≥ 2 Truppen', detail: `${c}/${scaled(T.g_bollwerk.goal, n)}`, met: missionGoalMet(s, pid, m) };
+  } else if (id === 'g_bastion') {
+    const s1 = scaled(T.g_bastion.stage1Troops, n);
+    const s2 = scaled(T.g_bastion.stage2Troops, n);
+    const gz = scaled(T.g_bastion.goalTroops, n);
+    const forts = (min) => countTerritoriesWithTroops(s, pid, min);
+    stage1 = { text: `Ein Gebiet mit ≥ ${s1} Truppen`, detail: forts(s1) >= 1 ? 'erreicht' : 'noch keins' };
+    stage2 = { text: `${T.g_bastion.stage2Count} Gebiete mit je ≥ ${s2} Truppen`, detail: `${Math.min(forts(s2), T.g_bastion.stage2Count)}/${T.g_bastion.stage2Count}` };
+    goal = { text: `Festung ≥ ${gz} Truppen + 1 Kontinent`, detail: `Festung: ${forts(gz) >= 1 ? 'ja' : 'nein'} · Kontinente: ${completedContinents(s, pid).length}`, met: missionGoalMet(s, pid, m) };
   } else if (m.target) {
     const xn = playerName(s, m.target);
     const x = playerById(s, m.target);
@@ -382,7 +392,7 @@ function stage2Met(s, pid) {
   const T = MISSION_TARGETS;
   if (id in KONTINENT_MISSIONS) return KONTINENT_MISSIONS[id].some((c) => continentComplete(s, pid, c));
   if (id === 'g_weltmacht') return countTerritories(s, pid) >= scaled(T.g_weltmacht.stage2, n);
-  if (id === 'g_bollwerk') return countTerritoriesWithTroops(s, pid, T.g_bollwerk.minTroops) >= scaled(T.g_bollwerk.stage2, n);
+  if (id === 'g_bastion') return countTerritoriesWithTroops(s, pid, scaled(T.g_bastion.stage2Troops, n)) >= T.g_bastion.stage2Count;
   if (m.target) {
     // §4.3: General von X durch dich besiegt 🔗 ODER X auf ≤ 4 Gebiete gedrückt
     const killedGeneral = playerById(s, pid)?.stats?.killedGeneralOf?.includes(m.target);
@@ -400,14 +410,13 @@ function reachStage(s, pid, idx, rng = Math.random) {
   p.stagesDone[idx] = true;
   p.stageBonus += MISSION_STAGE_BONUS;
   const level = idx === 0 ? 1 : 2; // Etappe 1 -> Stufe I, Etappe 2 -> Stufe II
-  // Etappe 2 stellt 3 Karten zur Wahl (mehr Reaktionsmöglichkeiten, z. B. Marschbefehl bei totem General)
-  grantDepescheChoice(s, pid, level, rng, idx === 1 ? 3 : 2);
+  grantDepescheChoice(s, pid, level, rng); // 3 unterschiedliche Karten zur Wahl
   addLog(s, `${p.name} hat eine Etappe erreicht (+${MISSION_STAGE_BONUS} Truppen, 1 Depesche).`); // welche bleibt geheim
 }
 
 // Etappe 1 = Ereignis, nach jeder Eroberung geprüft (nutzt turnStats des Spielers am Zug).
 function checkStage1(s, pid, rng) {
-  if (!s.missions) return;
+  if (!s.missions || s.phase === 'setup') return; // Startverteilung darf Etappe 1 nie auslösen (§2)
   const p = playerById(s, pid);
   const m = p?.mission;
   if (!m || p.stagesDone[0]) return;
@@ -424,8 +433,10 @@ function checkStage1(s, pid, rng) {
   } else if (id === 'f_feldherr') {
     // Kumulativ über Züge: General war an genug Eroberungen beteiligt (§4.4)
     ok = (p.stats?.generalConquests || 0) >= MISSION_TARGETS.feldherr.stage1GeneralConquests;
+  } else if (id === 'g_bastion') {
+    // Zustand, aber nie durch die Startverteilung (Setup oben ausgeschlossen): ein Gebiet ≥ Schwelle
+    ok = countTerritoriesWithTroops(s, pid, scaled(MISSION_TARGETS.g_bastion.stage1Troops, s.order.length)) >= 1;
   }
-  // g_bollwerk (Abwehr) ist kein Eroberungs-Ereignis → wird zu Zugbeginn geprüft
   if (ok) reachStage(s, pid, 0, rng);
 }
 
@@ -435,16 +446,8 @@ function checkStage2(s, pid, rng) {
   if (stage2Met(s, pid)) reachStage(s, pid, 1, rng);
 }
 
-// Abwehr zählen (§5.2): Gebiet nach der Angriffsaktion noch beim Verteidiger -> +1.
-function countDefense(s, toId, defenderId) {
-  if (!s.missions) return;
-  if (s.territories[toId].owner !== defenderId) return; // erobert -> keine Abwehr
-  const d = playerById(s, defenderId);
-  if (d?.stats) d.stats.defendedSinceOwnTurn = (d.stats.defendedSinceOwnTurn || 0) + 1;
-}
-
 function checkMissionVictory(s, pid) {
-  if (!s.missions || s.phase === 'gameover') return;
+  if (!s.missions || s.phase === 'gameover' || s.phase === 'setup') return;
   if (missionGoalMet(s, pid)) {
     // Einen noch offenen Nachrück-Vorgang abschließen, damit kein Gebiet auf 0 steht
     if (s.pendingMove) {
@@ -628,7 +631,7 @@ export function createGame(players, rng = Math.random, options = {}) {
       p.mission = null;
       p.stagesDone = [false, false]; // [Etappe 1, Etappe 2]
       p.stageBonus = 0; // +2 je erreichter Etappe, fließt in die nächste Verstärkung
-      p.stats = { defendedSinceOwnTurn: 0, generalConquests: 0, killedGeneralOf: [] }; // dauerhafte Zähler (§5.2)
+      p.stats = { generalConquests: 0, killedGeneralOf: [] }; // dauerhafte Zähler (§5.2)
       p.depeschen = []; // Hand (max. DEPESCHE_HAND_LIMIT)
       p.depeschenChoice = []; // offene Belohnungs-Wahlen (Warteschlange)
       p.pillory = null; // öffentlicher Missionstyp, sobald enttarnt (§6.4)
@@ -671,14 +674,6 @@ function startTurn(s, rng = Math.random) {
   s.attacksThisTurn = 0; // für das Angriffslimit der ersten Runde
   s.depeschePlayedThisTurn = false;
   s.tieBreakAttacker = null;
-  if (s.missions) {
-    // Bollwerk-Etappe 1 (Abwehr) zu Zugbeginn prüfen, damit der Bonus sofort zählt
-    const p = playerById(s, pid);
-    if (p.mission?.id === 'g_bollwerk' && !p.stagesDone[0] && (p.stats?.defendedSinceOwnTurn || 0) >= MISSION_TARGETS.g_bollwerk.stage1Defends) {
-      reachStage(s, pid, 0, rng);
-    }
-    if (p.stats) p.stats.defendedSinceOwnTurn = 0; // Zähler ab eigenem Zugbeginn neu
-  }
   const r = calcReinforcements(s, pid);
   s.phase = 'reinforce';
   s.reinforcements = r.total;
@@ -1045,7 +1040,6 @@ const HANDLERS = {
     );
     const conquered = s.territories[a.to].troops === 0;
     if (conquered) conquer(s, a.from, a.to, dice, pid, rng);
-    else countDefense(s, a.to, defender);
     recordMove(s, a.from, a.to, 'attack', conquered);
     if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
@@ -1082,7 +1076,6 @@ const HANDLERS = {
     );
     const conquered = to.troops === 0;
     if (conquered) conquer(s, a.from, a.to, dice, pid, rng);
-    else countDefense(s, a.to, defender);
     recordMove(s, a.from, a.to, 'attack', conquered);
     if (s.tieBreakAttacker === pid) s.tieBreakAttacker = null; // Überraschung verbraucht
     return null;
@@ -1170,6 +1163,7 @@ export function applyAction(prev, action, actorId, rng = Math.random) {
   if (!handler) return { error: `Unbekannte Aktion: ${action.type}` };
   const error = handler(s, action, actorId, rng);
   if (error) return { error };
+  checkStage1(s, actorId, rng); // Ereignis-Etappen (z. B. Bastion-Festung durch Verstärken) prüfen
   checkMissionVictory(s, actorId); // Endziel nach jeder eigenen Aktion prüfen
   return { state: s };
 }
