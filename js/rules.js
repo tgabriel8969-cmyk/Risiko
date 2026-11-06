@@ -239,6 +239,16 @@ export function missionType(mission) {
   return null;
 }
 
+/** Strukturierte Ziel-Hinweise einer Mission – für Heuristik/Bots (rein, kein DOM). */
+export function missionTargets(mission) {
+  if (!mission) return { continents: [], targetPlayer: null, wantTerritories: true };
+  const id = mission.id;
+  if (id in KONTINENT_MISSIONS) return { continents: KONTINENT_MISSIONS[id].slice(), targetPlayer: null, wantTerritories: false };
+  if (mission.target) return { continents: [], targetPlayer: mission.target, wantTerritories: false };
+  // Weltmacht, Bollwerk, Feldherr: einfach expandieren bzw. Kontinente halten
+  return { continents: [], targetPlayer: null, wantTerritories: true };
+}
+
 /** Ist das Endziel einer Mission aktuell erfüllt? (rein; mission default = die zugeteilte) */
 export function missionGoalMet(s, pid, mission = playerById(s, pid)?.mission) {
   if (!mission) return false;

@@ -9,6 +9,7 @@ import {
   missionGoalMet, missionProgress, buildMissionPool, MISSION_STAGE_BONUS,
   DEPESCHE_CARDS, DEPESCHE_HAND_LIMIT, missionType, PILLORY_LABEL,
 } from '../js/rules.js';
+import { missionBotAction } from './bots.js';
 
 // Deterministischer Zufall (mulberry32), damit Tests reproduzierbar sind
 function seeded(seed) {
@@ -696,6 +697,32 @@ test('abgefangen: ohne gültiges Pranger-Ziel wird beim Ziehen ersetzt', () => {
   assert.equal(me.stagesDone[1], true, 'Etappe 2 erreicht');
   assert.equal(me.depeschenChoice.length, 1, 'Stufe-II-Wahl angelegt');
   for (const c of me.depeschenChoice[0].cards) assert.notEqual(c, 'abgefangen', 'kein Pranger ohne Ziel');
+});
+
+// ------------------------------------------------------------------ Missions-Bot (Schritt 6)
+
+test('Missions-Bot: Partien enden, Siege sind gültig und Missionen sind erreichbar', () => {
+  let finished = 0;
+  let byMission = 0;
+  for (let g = 0; g < 24; g++) {
+    const rng = seeded(4000 + g);
+    const n = 3 + (g % 5); // 3..7 Spieler
+    let s = createGame(players(n), rng, { missions: true, ordenMode: g % 2 ? 'dynamic' : 'static' });
+    let steps = 0;
+    for (; steps < 60000 && s.phase !== 'gameover'; steps++) {
+      const action = missionBotAction(s, rng);
+      const r = applyAction(s, action, currentPlayerId(s), rng);
+      if (r.error) throw new Error(`Bot-Aktion abgelehnt (${JSON.stringify(action)}): ${r.error}`);
+      s = r.state;
+    }
+    assert.equal(s.phase, 'gameover', `Partie ${g} hing fest (keine Mission erreichbar?)`);
+    finished++;
+    const full = countTerritories(s, s.winner) === TERRITORIES.length;
+    assert.ok(full || missionGoalMet(s, s.winner), `Sieg ohne gültige Bedingung (Partie ${g})`);
+    if (!full && missionGoalMet(s, s.winner)) byMission++;
+  }
+  assert.equal(finished, 24);
+  assert.ok(byMission > 0, 'kein einziger Sieg über ein Missionsziel – Missionen wären unerreichbar');
 });
 
 // ------------------------------------------------------------------ Simulation
